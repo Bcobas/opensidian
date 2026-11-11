@@ -6316,10 +6316,11 @@ fn set_zoom_cfg(level: f64) {
 /// never a navigation target, so it is not listed.
 fn nav_allowed(u: &tauri::Url) -> bool {
     #[cfg(windows)]
-    return u.scheme() == "http" && u.host_str() == Some("tauri.localhost") && u.port().is_none()
-        && u.username().is_empty() && u.password().is_none();
+    let (scheme, host) = ("http", "tauri.localhost");
     #[cfg(target_os = "linux")]
-    u.scheme() == "tauri" && u.host_str() == Some("localhost") && u.port().is_none()
+    let (scheme, host) = ("tauri", "localhost");
+    u.scheme() == scheme && u.host_str() == Some(host) && u.port().is_none()
+        && u.username().is_empty() && u.password().is_none()
 }
 
 fn main() {

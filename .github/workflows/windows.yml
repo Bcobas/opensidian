@@ -50,3 +50,67 @@ jobs:
           name: Opensidian-Windows-x64
           path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
+      - name: Open a vault in WebView2
+        shell: pwsh
+        run: |
+          $vault = Join-Path $env:RUNNER_TEMP opensidian-smoke-vault
+          New-Item -ItemType Directory -Path $vault | Out-Null
+          Set-Content -LiteralPath (Join-Path $vault Smoke.md) -Value "# Smoke"
+          Copy-Item -LiteralPath src-tauri/icons/icon.png -Destination (Join-Path $vault sample.png)
+          $env:VAULT_DIR = $vault
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
+          $exe = "src-tauri/target/x86_64-pc-windows-msvc/release/opensidian.exe"
+          $app = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru
+          try {
+            $test = @'
+          const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+          const deadline = Date.now() + 45_000;
+          const timeout = setTimeout(() => { console.error("WebView2 smoke test timed out"); process.exit(1); }, 45_000);
+          async function run() {
+            let target;
+            while (!target && Date.now() < deadline) {
+              try {
+                const response = await fetch("http://127.0.0.1:9222/json/list", { signal: AbortSignal.timeout(1000) });
+                target = (await response.json()).find(tab => tab.url.startsWith("http://tauri.localhost/"));
+              } catch {}
+              if (!target) await delay(250);
+            }
+            if (!target) throw Error("Opensidian did not open its WebView2 page");
+            const socket = new WebSocket(target.webSocketDebuggerUrl);
+            try {
+              await new Promise((resolve, reject) => {
+                socket.addEventListener("open", resolve, { once: true });
+                socket.addEventListener("error", reject, { once: true });
+              });
+              const response = new Promise(resolve => {
+                socket.addEventListener("message", event => {
+                  const result = JSON.parse(event.data);
+                  if (result.id === 1) resolve(result);
+                });
+              });
+              socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: {
+                awaitPromise: true, returnByValue: true, expression: `(async () => {
+                  const invoke = window.__TAURI__.core.invoke;
+                  const names = await invoke("list_notes");
+                  if (!names.includes("Smoke")) throw Error("Vault note was not indexed");
+                  const text = "# Saved in WebView2";
+                  await invoke("write_note", { name: "Smoke", content: text });
+                  if (await invoke("read_note", { name: "Smoke" }) !== text) throw Error("Note did not round-trip");
+                  const image = new Image();
+                  image.src = "http://opensidian-img.localhost/sample.png";
+                  await image.decode();
+                  return "Opened the vault, saved a note, and loaded a vault image in WebView2";
+                })()`
+              }}));
+              const result = await response;
+              if (result.error || result.result?.exceptionDetails) throw Error(JSON.stringify(result));
+              console.log(result.result.result.value);
+            } finally { socket.close(); }
+          }
+          run().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => clearTimeout(timeout));
+          '@
+            $test | node -
+            if ($LASTEXITCODE -ne 0) { throw "WebView2 smoke test failed" }
+          } finally {
+            if (!$app.HasExited) { Stop-Process -Id $app.Id }
+          }

@@ -34,7 +34,9 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 
 // test seam: a named point between resolving a parent and using it, so a
 // test can swap a directory for a symlink deterministically. Production: a
