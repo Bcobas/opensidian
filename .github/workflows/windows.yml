@@ -39,9 +39,12 @@ jobs:
           $cli = Get-ChildItem $directory -Recurse -Filter cargo-tauri.exe | Select-Object -First 1
           if (!$cli) { throw 'Tauri CLI executable missing from archive' }
           $cli.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-      - name: Test vault and standalone document handling
+      - name: Test the vault backend
         working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --lib --bin opensidian
+        run: cargo test --release --locked --target x86_64-pc-windows-msvc --lib
+      - name: Test standalone Markdown documents
+        working-directory: src-tauri
+        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian reader::tests
       - name: Build NSIS installer
         run: cargo tauri build --ci --target x86_64-pc-windows-msvc -- --locked
       - name: Upload installer
