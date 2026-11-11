@@ -2550,7 +2550,7 @@ fn link_label(note: &str, anchor: &str, alias: &str, reading: bool) -> String {
 /// scan coalesced text for [[wikilinks]], emitting escaped anchors (H1 fix).
 /// data-note = note part (empty = same note), data-anchor = heading text or
 /// ^blockid (no leading '#') so the frontend can scroll after navigating.
-fn linkify(buf: &str, notes: &[String], imgs: &[String], reading: bool, urls: bool, evs: &mut Vec<Event>) {
+fn linkify(buf: &str, notes: &[String], reading: bool, urls: bool, evs: &mut Vec<Event>, image: &dyn Fn(&str, &str) -> String) {
     let mut rest = buf;
     while let Some(i) = rest.find("[[") {
         let Some(j) = rest[i + 2..].find("]]") else { break };
@@ -2562,7 +2562,7 @@ fn linkify(buf: &str, notes: &[String], imgs: &[String], reading: bool, urls: bo
         if i > 0 && rest.as_bytes()[i - 1] == b'!' && anchor.is_empty() && is_img_target(note) {
             tagify_urls(&rest[..i - 1], urls, evs);
             let alt = if alias.is_empty() { note } else { alias };
-            evs.push(Event::Html(image_html(imgs, note, alt).into()));
+            evs.push(Event::Html(image(note, alt).into()));
             rest = &rest[i + 2 + j + 2..];
             continue;
         }
@@ -2571,7 +2571,7 @@ fn linkify(buf: &str, notes: &[String], imgs: &[String], reading: bool, urls: bo
         if i > 0 && rest.as_bytes()[i - 1] == b'!' && is_pdf_target(note) {
             tagify_urls(&rest[..i - 1], urls, evs);
             let alt = if alias.is_empty() { note } else { alias };
-            evs.push(Event::Html(pdf_html(imgs, note, anchor, alt).into()));
+            evs.push(Event::Html(image(&format!("{note}{anchor}"), alt).into()));
             rest = &rest[i + 2 + j + 2..];
             continue;
         }
@@ -2952,6 +2952,13 @@ fn render_with(content: &str, notes: &[String], imgs: &[String], reading: bool) 
 /// Obsidian's REQ-16 "unaffected" set. Live preview passes false (REQ-17: it
 /// shows source lines; its blocks never render a multi-line paragraph).
 fn render_with_br(content: &str, notes: &[String], imgs: &[String], reading: bool, soft_br: bool) -> String {
+    render_with_images(content, notes, reading, soft_br, &|target, alt| image_html(imgs, target, alt))
+}
+
+fn render_with_images(
+    content: &str, notes: &[String], reading: bool, soft_br: bool,
+    image: &dyn Fn(&str, &str) -> String,
+) -> String {
     // deep-tasks QE16: the reading render drops %%comments%% (newlines kept, so line maps hold)
     let stripped = if reading { strip_comments(content) } else { std::borrow::Cow::Borrowed(content) };
     let content: &str = &stripped;
@@ -2987,7 +2994,7 @@ fn render_with_br(content: &str, notes: &[String], imgs: &[String], reading: boo
                 Event::Text(t) | Event::Code(t) => alt.push_str(&t),
                 Event::End(TagEnd::Image) => {
                     let (target, alt) = img_alt.take().expect("img_alt set");
-                    evs.push(Event::Html(image_html(imgs, &target, &alt).into()));
+                    evs.push(Event::Html(image(&target, &alt).into()));
                 }
                 _ => {}
             }
@@ -3018,13 +3025,13 @@ fn render_with_br(content: &str, notes: &[String], imgs: &[String], reading: boo
                     );
                     match if block_end { split_block_id(&buf) } else { None } {
                         Some((text, id)) => {
-                            linkify(text, notes, imgs, reading, demoted.iter().all(Option::is_some), &mut evs);
+                            linkify(text, notes, reading, demoted.iter().all(Option::is_some), &mut evs, image);
                             let id = esc(id);
                             evs.push(Event::Html(
                                 format!("<span class=\"blockid\" data-bid=\"{id}\">^{id}</span>").into(),
                             ));
                         }
-                        None => linkify(&buf, notes, imgs, reading, demoted.iter().all(Option::is_some), &mut evs),
+                        None => linkify(&buf, notes, reading, demoted.iter().all(Option::is_some), &mut evs, image),
                     }
                     buf.clear();
                 }
@@ -3133,7 +3140,7 @@ fn render_with_br(content: &str, notes: &[String], imgs: &[String], reading: boo
         }
     }
     if !buf.is_empty() {
-        linkify(&buf, notes, imgs, reading, demoted.iter().all(Option::is_some), &mut evs);
+        linkify(&buf, notes, reading, demoted.iter().all(Option::is_some), &mut evs, image);
     }
     let mut out = String::new();
     html::push_html(&mut out, evs.into_iter());

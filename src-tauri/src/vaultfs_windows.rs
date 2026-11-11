@@ -323,6 +323,35 @@ impl Vault {
         self.write_in(&parent, name, bytes)
     }
 
+    /// Stage the save first, then compare against the snapshot immediately before replacing it.
+    pub fn replace_if_unchanged(&self, rel: &Path, expected: &[u8], bytes: &[u8]) -> io::Result<bool> {
+        let (parent, name) = self.parent(rel, false)?;
+        let dir = parent.handle();
+        let mut stage = Stage::new(dir)?;
+        stage.file.write_all(bytes)?;
+        stage.file.sync_all()?;
+        let current = match open_at(dir, name, READ_DATA, SHARE_READ, OPEN, 0) {
+            Ok(file) => regular(file)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let mut original = Vec::new();
+        current.take(expected.len() as u64 + 1).read_to_end(&mut original)?;
+        if original != expected {
+            return Ok(false);
+        }
+        stage.commit(name, true)?;
+        Ok(true)
+    }
+
+    pub fn write_new_atomic(&self, rel: &Path, bytes: &[u8]) -> io::Result<()> {
+        let (parent, name) = self.parent(rel, false)?;
+        let mut stage = Stage::new(parent.handle())?;
+        stage.file.write_all(bytes)?;
+        stage.file.sync_all()?;
+        stage.commit(name, false)
+    }
+
     pub fn create_new(&self, rel: &Path, parents: bool) -> io::Result<File> {
         let (parent, name) = self.parent(rel, parents)?;
         open_at(parent.handle(), name, WRITE_DATA, SHARE_READ, CREATE, 0)

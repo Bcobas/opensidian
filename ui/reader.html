@@ -8,7 +8,23 @@
   <script src="reader.js" defer></script>
 </head>
 <body class="standalone-reader">
-  <main id="document" class="preview" aria-label="Markdown document" tabindex="0"></main>
+  <header class="reader-toolbar" id="reader-toolbar" hidden>
+    <button id="reader-convert" hidden>Convert to Markdown</button>
+    <button id="reader-edit" aria-pressed="false">Edit</button>
+    <button id="reader-preview" aria-pressed="true">Preview</button>
+    <button id="reader-save">Save</button>
+    <button id="reader-copy" hidden>Save a Markdown copy</button>
+    <button id="reader-reload" hidden>Reload from disk</button>
+  </header>
+  <main id="document" class="preview" aria-label="Document preview" tabindex="0"></main>
+  <textarea id="reader-source" aria-label="Document text" spellcheck="false" hidden></textarea>
   <p id="reader-status" role="status" hidden></p>
+  <dialog id="reader-discard" aria-labelledby="reader-discard-title">
+    <form method="dialog">
+      <p id="reader-discard-title">Discard your unsaved changes?</p>
+      <button value="cancel" autofocus>Keep editing</button>
+      <button value="discard">Discard changes</button>
+    </form>
+  </dialog>
 </body>
 </html>

@@ -729,11 +729,44 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
 .preview { flex: 1 1 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
            cursor: default }   /* R22 */
 .standalone-reader { flex-direction: column }
-.standalone-reader .preview {
+.standalone-reader .preview, .standalone-reader #reader-source {
   padding: 1.5rem max(1.25rem, calc((100% - var(--file-line-width)) / 2));
   overflow-wrap: anywhere;
 }
-.standalone-reader .preview a:not(.ext) { cursor: default }
+.standalone-reader #reader-source {
+  flex: 1 1 0;
+  min-height: 0;
+  resize: none;
+  border: 0;
+  background: var(--bg-base);
+  color: var(--text-normal);
+  font: var(--font-text-size)/var(--line-height-normal) var(--font-monospace);
+}
+.standalone-reader .reader-toolbar:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.5rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sidebar);
+}
+.standalone-reader button {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--bg-sidebar);
+  color: inherit;
+}
+.standalone-reader button[aria-pressed="true"] { border-color: var(--accent-blue) }
+.standalone-reader button:disabled { opacity: 0.5 }
+.standalone-reader dialog {
+  background: var(--bg-sidebar);
+  color: var(--text-normal);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+}
+.standalone-reader .preview a.tag { cursor: default }
+.standalone-reader .reader-plain { white-space: pre-wrap }
 .standalone-reader #reader-status { margin: 0; padding: 1rem 1.25rem }
 /* modeswitch opt6: the view the edit <-> reading switch left stays LAID OUT (ui/main.js
    applyMode): out of flow over the same box, same width, never painted, never hit.
