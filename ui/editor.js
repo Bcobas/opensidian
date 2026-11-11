@@ -457,7 +457,7 @@ const Ed = {
      and gets no URL at all (the byte server re-checks containment anyway).
      An unresolved target is R29.4's banner in both engines. */
   IMG_EXTS: ["png", "jpg", "jpeg", "gif", "webp"],
-  IMG_ORIGIN: location.hostname === "tauri.localhost" ? "http://opensidian-img.localhost/" : "opensidian-img://localhost/",
+  IMG_ORIGIN: globalThis.location?.hostname === "tauri.localhost" ? "http://opensidian-img.localhost/" : "opensidian-img://localhost/",
   isImg(t) {                                   // is this target an IMAGE embed, not a note embed?
     const i = t.lastIndexOf(".");
     return i >= 0 && Ed.IMG_EXTS.includes(t.slice(i + 1).toLowerCase());
