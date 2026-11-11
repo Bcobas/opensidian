@@ -18,6 +18,16 @@ Download one from the [v0.9.2 release](https://github.com/jpzk/opensidian/releas
 | [RPM](https://github.com/jpzk/opensidian/releases/download/v0.9.2/opensidian-0.9.2-x86_64.rpm) | you run Fedora and want a system package with a menu entry and icon; dnf pulls WebKitGTK 4.1 for you | Fedora 44 (`sudo dnf install ./opensidian-0.9.2-x86_64.rpm`) |
 | [DEB](https://github.com/jpzk/opensidian/releases/download/v0.9.2/opensidian-0.9.2-x86_64.deb) | you run Debian or Ubuntu and want a system package with a menu entry and icon; apt pulls WebKitGTK 4.1 for you | Debian 13, Ubuntu 26.04 LTS (`sudo apt install ./opensidian-0.9.2-x86_64.deb`) |
 
+### Windows x64
+
+Download the unsigned NSIS installer from a successful run of the [Windows build workflow](https://github.com/Bcobas/opensidian/actions/workflows/windows.yml). The installer uses Microsoft Edge WebView2. Community plugins and Landlock are unavailable on Windows.
+
+To build locally, install the MSVC C++ build tools, WebView2, Rust 1.98.0, and Tauri CLI 2.11.4. From the repository root, run:
+
+```powershell
+cargo +1.98.0 tauri build --target x86_64-pc-windows-msvc -- --locked
+```
+
 ### Nix & NixOS
 
 ```sh

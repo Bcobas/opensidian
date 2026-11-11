@@ -661,7 +661,7 @@ macro_rules! span_timed {
     }};
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

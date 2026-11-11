@@ -290,7 +290,7 @@ pub fn sweep_ghosts(root: &Path, cur: &Snapshot, ix: &mut Index) -> Vec<String> 
     }
     ghosts
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::time::Duration;

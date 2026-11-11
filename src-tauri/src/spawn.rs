@@ -158,6 +158,7 @@ pub fn await_ready(ready: impl Fn() -> bool, alive: impl Fn() -> bool, timeout: 
 
 /// is `pid` a live (non-zombie) process? Reads /proc/<pid>/stat — a read
 /// root under landlock; signals (kill 0) may be scoped there.
+#[cfg(target_os = "linux")]
 pub fn alive(pid: u32) -> bool {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         // "pid (comm) S ..." — comm may hold spaces/parens: state follows the LAST ')'
@@ -165,6 +166,9 @@ pub fn alive(pid: u32) -> bool {
         Err(_) => false,
     }
 }
+
+#[cfg(windows)]
+pub use crate::windows::process_alive as alive;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Launcher {
@@ -214,10 +218,13 @@ pub fn current() -> Result<Launcher, String> {
 
 /// build the Command (not spawned) — split out so the env scrub is testable.
 pub fn command(l: &Launcher, vault: &Path, sw: Option<&Switch>) -> std::process::Command {
+    #[cfg(target_os = "linux")]
     use std::os::unix::process::CommandExt;
     let (prog, args) = argv(l, vault, sw);
     let mut c = std::process::Command::new(prog);
-    c.args(args).env_remove("VAULT_DIR").stdin(std::process::Stdio::null()).process_group(0);
+    c.args(args).env_remove("VAULT_DIR").stdin(std::process::Stdio::null());
+    #[cfg(target_os = "linux")]
+    c.process_group(0);
     c
 }
 
@@ -234,7 +241,7 @@ pub fn open_in_new_process(vault: &Path, sw: Option<&Switch>) -> Result<u32, Str
     Ok(pid)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

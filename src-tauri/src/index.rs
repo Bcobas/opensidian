@@ -454,7 +454,7 @@ fn walk(dir: &Path, base: &Path, out: &mut Vec<String>, imgs: &mut Vec<String>) 
             out.push(if rel.as_os_str().is_empty() {
                 stem.to_string()
             } else {
-                format!("{}/{}", rel.display(), stem)
+                format!("{}/{}", crate::vault_path_string(rel), stem)
             });
         }
     }
@@ -481,7 +481,7 @@ fn img_rel(p: &Path, base: &Path, name: &str) -> Option<String> {
     Some(if dir.as_os_str().is_empty() {
         name.to_string()
     } else {
-        format!("{}/{name}", dir.display())
+        format!("{}/{name}", crate::vault_path_string(dir))
     })
 }
 
@@ -505,7 +505,7 @@ pub fn attachments_of(root: &Path) -> Vec<String> {
                 go(&p, base, out);
             } else if !name.ends_with(".md") {
                 if let Ok(rel) = p.strip_prefix(base) {
-                    out.push(rel.to_string_lossy().into_owned());
+                    out.push(crate::vault_path_string(rel));
                 }
             }
         }

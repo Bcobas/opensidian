@@ -24,10 +24,15 @@
    canonicalized once (so `~/Notes -> /data/notes` keeps working) and the
    canonical path is opened O_NOFOLLOW. Everything below it is untrusted. */
 
+#[cfg(target_os = "linux")]
 use std::ffi::{CString, OsStr};
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
+#[cfg(target_os = "linux")]
+use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -38,10 +43,12 @@ use std::path::{Component, Path, PathBuf};
 // bin's tests (main.rs) link vaultfs as a DEPENDENCY, where cfg(test) is off.
 // Unset (the default) every seam is a no-op; release builds still drop them.
 #[cfg(any(test, debug_assertions))]
+#[cfg(target_os = "linux")]
 thread_local! {
     static HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&'static str)>>> = std::cell::RefCell::new(None);
 }
 #[inline(always)]
+#[cfg(target_os = "linux")]
 fn hook(_at: &'static str) {
     #[cfg(any(test, debug_assertions))]
     HOOK.with(|h| {
@@ -51,6 +58,7 @@ fn hook(_at: &'static str) {
     });
 }
 #[cfg(any(test, debug_assertions))]
+#[cfg(target_os = "linux")]
 pub fn set_hook(f: Option<Box<dyn FnMut(&'static str)>>) {
     HOOK.with(|h| *h.borrow_mut() = f);
 }
@@ -59,10 +67,12 @@ pub fn set_hook(f: Option<Box<dyn FnMut(&'static str)>>) {
    the named step, so a test can prove what an interrupted import leaves behind.
    In a release build it is `hook(at); Ok(())` — no branch, no state. */
 #[cfg(any(test, debug_assertions))]
+#[cfg(target_os = "linux")]
 thread_local! {
     static FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
     static FORCE_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+#[cfg(target_os = "linux")]
 fn fault(at: &'static str) -> io::Result<()> {
     #[cfg(any(test, debug_assertions))]
     if FAULT.with(|f| f.get()) == Some(at) {
@@ -72,14 +82,17 @@ fn fault(at: &'static str) -> io::Result<()> {
     Ok(())
 }
 #[cfg(any(test, debug_assertions))]
+#[cfg(target_os = "linux")]
 pub fn set_fault(at: Option<&'static str>) {
     FAULT.with(|f| f.set(at));
 }
 /// tests only: take the cross-filesystem (copy) road even on one filesystem
 #[cfg(any(test, debug_assertions))]
+#[cfg(target_os = "linux")]
 pub fn set_force_copy(on: bool) {
     FORCE_COPY.with(|f| f.set(on));
 }
+#[cfg(target_os = "linux")]
 fn force_copy() -> bool {
     #[cfg(any(test, debug_assertions))]
     return FORCE_COPY.with(|f| f.get());
@@ -114,12 +127,14 @@ pub struct Imported {
     pub how: &'static str, // "link" (same filesystem) | "copy" (crossed one)
 }
 
+#[cfg(target_os = "linux")]
 fn fs_lstat(p: &CString) -> io::Result<libc::stat> {
     stat_at(libc::AT_FDCWD, p)
 }
 
 /// pdfdrop: does the OPEN file start with `magic`? pread at offset 0, so the fd's
 /// cursor is untouched for the copy that follows; a short file is a mismatch.
+#[cfg(target_os = "linux")]
 fn starts_with_at0(f: &File, magic: &[u8]) -> io::Result<bool> {
     use std::os::unix::fs::FileExt;
     let mut head = vec![0u8; magic.len()];
@@ -171,14 +186,17 @@ fn refused(rel: &Path, why: &str) -> io::Error {
     e
 }
 
+#[cfg(target_os = "linux")]
 fn cstr(s: &OsStr) -> io::Result<CString> {
     CString::new(s.as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))
 }
 
+#[cfg(target_os = "linux")]
 fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
     if r < 0 { Err(io::Error::last_os_error()) } else { Ok(r) }
 }
 
+#[cfg(target_os = "linux")]
 fn stat_at(dfd: RawFd, name: &CString) -> io::Result<libc::stat> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: valid fd, NUL-terminated name, st is written by the kernel on success
@@ -186,6 +204,7 @@ fn stat_at(dfd: RawFd, name: &CString) -> io::Result<libc::stat> {
     Ok(unsafe { st.assume_init() })
 }
 
+#[cfg(target_os = "linux")]
 fn fstat(fd: RawFd) -> io::Result<libc::stat> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: valid fd; st is written by the kernel on success
@@ -193,10 +212,12 @@ fn fstat(fd: RawFd) -> io::Result<libc::stat> {
     Ok(unsafe { st.assume_init() })
 }
 
+#[cfg(target_os = "linux")]
 fn is_reg(st: &libc::stat) -> bool {
     st.st_mode & libc::S_IFMT == libc::S_IFREG
 }
 
+#[cfg(target_os = "linux")]
 fn open_dir_at(dfd: RawFd, name: &CString) -> io::Result<OwnedFd> {
     // SAFETY: valid fd + NUL-terminated name; the returned fd is owned below
     let fd = cvt(unsafe {
@@ -207,6 +228,7 @@ fn open_dir_at(dfd: RawFd, name: &CString) -> io::Result<OwnedFd> {
 
 /// the process umask, read without changing it (umask(2) would set it, racing
 /// every other thread that creates a file meanwhile)
+#[cfg(target_os = "linux")]
 fn umask() -> u32 {
     static M: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *M.get_or_init(|| {
@@ -221,6 +243,7 @@ fn umask() -> u32 {
 /// a temp name nobody can predict: 16 hex chars from the kernel's CSPRNG.
 /// Dot-prefixed and `~`-suffixed, so no index/watcher (dot-skipping, .md/.json
 /// matching) ever picks it up even if a crash leaves it behind.
+#[cfg(target_os = "linux")]
 fn tmp_name(leaf: &OsStr) -> io::Result<CString> {
     let mut b = [0u8; 8];
     File::open("/dev/urandom")?.read_exact(&mut b)?;
@@ -233,6 +256,7 @@ fn tmp_name(leaf: &OsStr) -> io::Result<CString> {
 
 /// a vault-relative path split into checked components; anything but plain
 /// names (`..`, `/`, `.`, empty) is refused before any syscall
+#[cfg(target_os = "linux")]
 fn parts(rel: &Path) -> io::Result<Vec<&OsStr>> {
     let mut v = Vec::new();
     for c in rel.components() {
@@ -249,15 +273,18 @@ fn parts(rel: &Path) -> io::Result<Vec<&OsStr>> {
 
 /// a directory INSIDE the vault, held open: the thing every leaf op is
 /// relative to
+#[cfg(target_os = "linux")]
 pub struct Dir {
     fd: OwnedFd,
 }
 
 /// the vault root, opened once
+#[cfg(target_os = "linux")]
 pub struct Vault {
     root: Dir,
 }
 
+#[cfg(target_os = "linux")]
 impl Vault {
     pub fn open(root: &Path) -> io::Result<Vault> {
         let croot = root.canonicalize()?;
@@ -684,6 +711,19 @@ pub const PLUGIN_READ_CAP: u64 = 64 << 20;
 pub const PLUGIN_MODE_MASK: u32 = 0o777;
 const PLUGIN_PATH_MAX: usize = 4096;
 
+#[cfg(windows)]
+#[path = "vaultfs_windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub use windows::{Dir, Vault};
+
+pub fn valid_component(name: &std::ffi::OsStr) -> bool {
+    #[cfg(windows)]
+    return windows::valid_component(name);
+    #[cfg(not(windows))]
+    { let _ = name; true }
+}
+
 /// a plugin-supplied vault-relative path -> checked relative PathBuf ("" = the
 /// vault root). Lexical refusals only; the fd walk does the rest.
 pub fn plugin_rel(s: &str) -> io::Result<PathBuf> {
@@ -713,7 +753,8 @@ pub fn plugin_rel(s: &str) -> io::Result<PathBuf> {
         match c {
             "" => {}
             "." | ".." => return Err(r("dot component")),
-            _ => out.push(c),
+            _ if valid_component(std::ffi::OsStr::new(c)) => out.push(c),
+            _ => return Err(r("invalid path component")),
         }
     }
     Ok(out)
@@ -728,6 +769,7 @@ pub struct PStat {
     pub ctime_ms: i64,
 }
 
+#[cfg(target_os = "linux")]
 fn pstat_of(rel: &Path, st: &libc::stat) -> io::Result<PStat> {
     let kind = match st.st_mode & libc::S_IFMT {
         libc::S_IFREG => "file",
@@ -744,6 +786,7 @@ fn pstat_of(rel: &Path, st: &libc::stat) -> io::Result<PStat> {
     })
 }
 
+#[cfg(target_os = "linux")]
 impl Vault {
     /// the leaf's lstat relative to its held parent; "" = the root itself
     fn p_lstat(&self, rel: &Path) -> io::Result<libc::stat> {
@@ -957,6 +1000,18 @@ pub fn plugin_err(op: &str, path: &str, e: &io::Error) -> String {
     if e.kind() == io::ErrorKind::PermissionDenied && e.raw_os_error().is_none() {
         return format!("EPERM: vault-escape refused, {op} '{p}' ({e})");
     }
+    #[cfg(windows)]
+    let code = match e.kind() {
+        io::ErrorKind::NotFound => "ENOENT",
+        io::ErrorKind::AlreadyExists => "EEXIST",
+        io::ErrorKind::NotADirectory => "ENOTDIR",
+        io::ErrorKind::IsADirectory => "EISDIR",
+        io::ErrorKind::DirectoryNotEmpty => "ENOTEMPTY",
+        io::ErrorKind::InvalidInput => "EINVAL",
+        io::ErrorKind::PermissionDenied => "EACCES",
+        _ => "EIO",
+    };
+    #[cfg(target_os = "linux")]
     let code = match e.raw_os_error() {
         Some(libc::ENOENT) => "ENOENT",
         Some(libc::EEXIST) => "EEXIST",
@@ -1088,7 +1143,7 @@ fn walk_real_dirs_at(dir: &Path, base: &Path, out: &mut Vec<String>, depth: usiz
     }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
-        if e.file_name().as_bytes().first() == Some(&b'.') {
+        if e.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
         // DirEntry::file_type does NOT follow symlinks: a symlinked dir is
@@ -1098,13 +1153,13 @@ fn walk_real_dirs_at(dir: &Path, base: &Path, out: &mut Vec<String>, depth: usiz
         }
         let p = e.path();
         if let Ok(rel) = p.strip_prefix(base) {
-            out.push(rel.display().to_string());
+            out.push(crate::vault_path_string(rel));
         }
         walk_real_dirs_at(&p, base, out, depth + 1);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::fs;

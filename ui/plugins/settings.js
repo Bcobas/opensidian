@@ -194,45 +194,50 @@
   }
   function buildCommunity(pg) {
     const s = host.state();
-    const restricted = !s.trusted;
-    const c1 = el("div", "scard"); pg.appendChild(c1);
-    const rt = toggle(restricted, () => act(() => host.setRestricted(!restricted)));
-    rt.id = "cprestrict";
-    row(c1, "Restricted mode", [
-      restricted ? "On: no community plugin code runs in this vault." : "Off: enabled community plugins run with this app's access to your vault.",
-      "Plugins are third-party code. Turn restricted mode off only for plugins you trust."], [rt]);
-    if (browser) {
-      const b = el("button", "cpb-btn cpb-cta", "Browse");
-      b.id = "cpbrowse"; b.type = "button";
-      b.onclick = ev => { ev.stopPropagation(); startBrowsing(); };
-      row(c1, "Community plugin list", "Find plugins in the public community list, then install, update or remove them here.", [b]);
-    }
-    pg.appendChild(el("div", "ssec", "Installed plugins"));
-    const c2 = el("div", "scard"); pg.appendChild(c2);
-    const ids = Object.keys(s.installed).sort((a, b) => String(s.installed[a].name || a).localeCompare(String(s.installed[b].name || b)));
-    if (!ids.length) {
-      row(c2, "No community plugins installed", "Copy a plugin folder (main.js + manifest.json) into .obsidian/plugins/ in this vault.", [], true);
-    }
-    for (const id of ids) {
-      const m = s.installed[id] || {};
-      const on = s.enabled.includes(id), loaded = s.loaded.includes(id);
-      const st = host.status.get(id);
-      const ctls = [];
-      if (loaded && tabOf(id)) {
-        const g = el("div", "sctl cpgear"); g.innerHTML = GI.gear; g.title = "Options"; g.tabIndex = 0;
-        g.onclick = ev => { ev.stopPropagation(); showSettingsPage("plg:" + id); };
-        ctls.push(g);
+    if (location.hostname === "tauri.localhost") {
+      const card = el("div", "scard"); pg.appendChild(card);
+      row(card, "Community plugins", "Community plugins are unavailable in this Windows build.", [], true);
+    } else {
+      const restricted = !s.trusted;
+      const c1 = el("div", "scard"); pg.appendChild(c1);
+      const rt = toggle(restricted, () => act(() => host.setRestricted(!restricted)));
+      rt.id = "cprestrict";
+      row(c1, "Restricted mode", [
+        restricted ? "On: no community plugin code runs in this vault." : "Off: enabled community plugins run with this app's access to your vault.",
+        "Plugins are third-party code. Turn restricted mode off only for plugins you trust."], [rt]);
+      if (browser) {
+        const b = el("button", "cpb-btn cpb-cta", "Browse");
+        b.id = "cpbrowse"; b.type = "button";
+        b.onclick = ev => { ev.stopPropagation(); startBrowsing(); };
+        row(c1, "Community plugin list", "Find plugins in the public community list, then install, update or remove them here.", [b]);
       }
-      const t = toggle(on, () => act(() => host.setEnabled(id, !on)));
-      t.dataset.plugin = id;
-      ctls.push(t);
-      const desc = [
-        "Version " + (m.version || "?") + (m.author ? " · By " + m.author : ""),
-        m.description || "",
-        st && st.state === "failed" ? "Failed to load: " + String(st.error || "") : (restricted && on ? "Enabled, not running: restricted mode is on." : ""),
-      ];
-      const r = row(c2, String(m.name || id), desc, ctls, restricted);
-      r.dataset.plugin = id;
+      pg.appendChild(el("div", "ssec", "Installed plugins"));
+      const c2 = el("div", "scard"); pg.appendChild(c2);
+      const ids = Object.keys(s.installed).sort((a, b) => String(s.installed[a].name || a).localeCompare(String(s.installed[b].name || b)));
+      if (!ids.length) {
+        row(c2, "No community plugins installed", "Copy a plugin folder (main.js + manifest.json) into .obsidian/plugins/ in this vault.", [], true);
+      }
+      for (const id of ids) {
+        const m = s.installed[id] || {};
+        const on = s.enabled.includes(id), loaded = s.loaded.includes(id);
+        const st = host.status.get(id);
+        const ctls = [];
+        if (loaded && tabOf(id)) {
+          const g = el("div", "sctl cpgear"); g.innerHTML = GI.gear; g.title = "Options"; g.tabIndex = 0;
+          g.onclick = ev => { ev.stopPropagation(); showSettingsPage("plg:" + id); };
+          ctls.push(g);
+        }
+        const t = toggle(on, () => act(() => host.setEnabled(id, !on)));
+        t.dataset.plugin = id;
+        ctls.push(t);
+        const desc = [
+          "Version " + (m.version || "?") + (m.author ? " · By " + m.author : ""),
+          m.description || "",
+          st && st.state === "failed" ? "Failed to load: " + String(st.error || "") : (restricted && on ? "Enabled, not running: restricted mode is on." : ""),
+        ];
+        const r = row(c2, String(m.name || id), desc, ctls, restricted);
+        r.dataset.plugin = id;
+      }
     }
     /* goal canvas-core: the "Core plugins" section (the Core plugins nav entry stays removed,
        goal/noplugins): one row per core plugin this app implements — today Canvas. Its toggle is

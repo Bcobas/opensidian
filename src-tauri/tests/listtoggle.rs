@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")]
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! listtoggle unit table (spec R4 / acceptance A2).
 //!

@@ -543,7 +543,7 @@ pub(crate) async fn store_uninstall(v: tauri::State<'_, crate::Vault>, id: Strin
     crate::span_timed!("store_uninstall", blocking(move || uninstall(&root, &id)).await)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::path::PathBuf;

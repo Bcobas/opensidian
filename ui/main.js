@@ -11622,6 +11622,9 @@ async function loadRecent() {
   if (vaultPath) { try { updateTitle(); } catch (_) {} }   // brand: publish [precent:] once the rows exist (async); never at the boot picker, whose window must stay untitled by the census
 }
 async function browseTo(p) {
+  if (location.hostname === "tauri.localhost") {
+    p = p.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "").replaceAll("\\", "/");
+  }
   const dirs = await inv("list_dirs", { path: p });
   bpath = p;
   $("p-path").value = p;
@@ -11629,12 +11632,16 @@ async function browseTo(p) {
   ul.innerHTML = "";
   const up = document.createElement("li");
   up.textContent = "..";
-  up.onclick = () => browseTo(bpath.replace(/\/[^/]+\/?$/, "") || "/");
+  up.onclick = () => {
+    if (/^[A-Za-z]:\/$/.test(bpath) || /^\/\/[^/]+\/[^/]+\/?$/.test(bpath)) return;
+    const parent = bpath.replace(/\/[^/]+\/?$/, "") || "/";
+    browseTo(/^[A-Za-z]:$/.test(parent) ? parent + "/" : parent);
+  };
   ul.appendChild(up);
   for (const d of dirs) {
     const li = document.createElement("li");
     li.textContent = d + "/";
-    li.onclick = () => browseTo((bpath === "/" ? "" : bpath) + "/" + d);
+    li.onclick = () => browseTo(bpath.replace(/\/$/, "") + "/" + d);
     ul.appendChild(li);
   }
 }

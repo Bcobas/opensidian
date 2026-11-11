@@ -100,7 +100,10 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
         if ft.is_dir() {
             copy_dir(&src, &dst)?;
         } else if ft.is_symlink() {
+            #[cfg(target_os = "linux")]
             std::os::unix::fs::symlink(fs::read_link(&src)?, &dst)?;
+            #[cfg(windows)]
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "legacy data contains a symbolic link"));
         } else {
             fs::copy(&src, &dst)?;
         }
@@ -139,6 +142,7 @@ pub fn vault_bookmarks(vault: &Path) -> Option<PathBuf> {
 
 const MAX_BM_BYTES: u64 = 4 * 1024 * 1024;
 
+#[cfg(target_os = "linux")]
 fn carry_vault_file(vault: &Path, old: &str, new: &str) -> io::Result<Carry> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
@@ -163,7 +167,22 @@ fn carry_vault_file(vault: &Path, old: &str, new: &str) -> io::Result<Carry> {
     Ok(Carry::Copied)
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn carry_vault_file(vault: &Path, old: &str, new: &str) -> io::Result<Carry> {
+    if fs::symlink_metadata(vault.join(new)).is_ok() {
+        return Ok(Carry::NewWins);
+    }
+    let vault = crate::vaultfs::Vault::open(vault)?;
+    let bytes = match vault.p_read(Path::new(old), MAX_BM_BYTES) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Carry::Neither),
+        Err(e) => return Err(e),
+    };
+    vault.write_atomic(Path::new(new), &bytes, false)?;
+    Ok(Carry::Copied)
+}
+
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

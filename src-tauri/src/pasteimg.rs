@@ -184,7 +184,7 @@ pub fn paste_into(
             let _ = vfs.unlink(&rel); // reason: best effort — a half-written file must not stay; the error below is what matters
             return Err(PasteErr::Io(e.to_string()));
         }
-        let path = rel.to_string_lossy().to_string();
+        let path = opensidian_lib::vault_path_string(&rel);
         let target = if taken(&name) { path.clone() } else { name.clone() };
         let text = if md_links { format!("![]({})", enc_uri(&target)) } else { format!("![[{target}]]") };
         return Ok(Pasted { text, path });
@@ -204,7 +204,7 @@ pub fn app_cfg(root: &Path) -> (String, bool) {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::fs;

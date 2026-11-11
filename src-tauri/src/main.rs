@@ -21,6 +21,7 @@ mod appid;
 mod builtins;
 use opensidian_lib::canvasfs;
 mod cfgstore;
+#[cfg(target_os = "linux")]
 mod consent; // spawn-consent: native GTK prompts before trusting a vault and before every plugin spawn
 mod census; // census-gate (#30): the window-title census is opt-in (OPENSIDIAN_CENSUS=1 / devui)
 use opensidian_lib::datefmt;
@@ -34,16 +35,21 @@ mod plugin_store;
 mod pasteimg;
 mod qscreate;
 mod perf;
+#[cfg(target_os = "linux")]
 mod sandbox;
 // cp-secrets: app.secretStorage over the OS keyring (Secret Service)
 mod secrets;
 mod settings;
 mod spawn;
+#[cfg(target_os = "linux")]
 mod spawner;
+#[cfg(target_os = "linux")]
 mod desk_http;
+#[cfg(target_os = "linux")]
 mod desk_net;
+#[cfg(target_os = "linux")]
 mod desk_proc;
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod testutil; // shared unit-test helpers (write_exe: no ETXTBSY from a write fd a parallel fork inherited)
 #[cfg(feature = "devui")]
 mod devui; // goal devui: DEV-ONLY UI hot reload, never in a default/release build
@@ -54,6 +60,29 @@ mod updates;
 use opensidian_lib::vaultfs;
 mod watcher;
 mod winsize;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+mod sandbox {
+    use std::path::Path;
+
+    pub const DROP_READ_DIRS: [&str; 3] = ["Pictures", "Downloads", "Desktop"];
+
+    pub fn allows(_path: &Path) -> bool { true }
+    pub fn confined_to() -> Option<&'static Path> { None }
+}
+
+macro_rules! via_spawner {
+    ($client:ident => $remote:expr, $local:expr) => {{
+        #[cfg(target_os = "linux")]
+        let result = if let Some($client) = spawner::client() { $remote } else { $local };
+        #[cfg(windows)]
+        let result = $local;
+        result
+    }};
+}
+
 use index::{link_parts, links_in, resolve, tag_spans, Graph, Index};
 
 /* perf-index: root + in-memory Index (src/index.rs). The index replaces the
@@ -180,7 +209,7 @@ fn safe_rel(name: &str) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     for c in Path::new(name).components() {
         match c {
-            Component::Normal(s) if !s.to_string_lossy().starts_with('.') => out.push(s),
+            Component::Normal(s) if !s.to_string_lossy().starts_with('.') && vaultfs::valid_component(s) => out.push(s),
             _ => return None,
         }
     }
@@ -254,6 +283,10 @@ const IMG_TYPES: [(&str, &str); 5] = [
 
 /// the scheme our images are served on; the CSP names it exactly (R29 / S1)
 const IMG_SCHEME: &str = "opensidian-img";
+#[cfg(windows)]
+const IMG_ORIGIN: &str = "http://opensidian-img.localhost";
+#[cfg(target_os = "linux")]
+const IMG_ORIGIN: &str = "opensidian-img://localhost";
 
 /// R29.10: the label the R29.4 banner carries in place of a REMOTE target.
 /// Both engines paint the same sentence (ui/editor.js `imgEl` sets it as
@@ -428,6 +461,7 @@ fn media_mime(ext: &str) -> Option<&'static str> {
 /// openat(O_NOFOLLOW) per component, and check the OPENED fd is a regular
 /// file (O_NONBLOCK so a FIFO cannot hang the open). No path is re-resolved
 /// between the check and the read.
+#[cfg(target_os = "linux")]
 fn media_open(root: &Path, rel: &Path) -> Option<fs::File> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -459,6 +493,11 @@ fn media_open(root: &Path, rel: &Path) -> Option<fs::File> {
     }
     let f = fs::File::from(open_at(dir.as_raw_fd(), leaf, libc::O_RDONLY | libc::O_NONBLOCK)?);
     f.metadata().ok()?.is_file().then_some(f)
+}
+
+#[cfg(windows)]
+fn media_open(root: &Path, rel: &Path) -> Option<fs::File> {
+    vaultfs::Vault::open(root).ok()?.open_read(rel).ok()
 }
 
 /// cvf-mediasrv (ruling 1.2): rename ONE media file inside the vault — the
@@ -576,7 +615,7 @@ fn image_html(imgs: &[String], target: &str, alt: &str) -> String {
     let dec = pct_decode(target).unwrap_or_else(|| target.to_string());
     match index::resolve(imgs, &dec).map(|i| &imgs[i]) {
         Some(rel) => format!(
-            "<img class=\"vimg\" src=\"{IMG_SCHEME}://localhost/{}\" alt=\"{}\">",
+            "<img class=\"vimg\" src=\"{IMG_ORIGIN}/{}\" alt=\"{}\">",
             pct_encode(rel),
             esc(alt)
         ),
@@ -866,7 +905,7 @@ fn attach_drop(root: &Path, note: &str, paths: &[PathBuf]) -> Result<Attached, D
     let (dir, notice) = attach_dir(root)?;
     let croot = root.canonicalize().map_err(|_| DropErr::BadAttachDir)?;
     let rel_path = dir.strip_prefix(&croot).map_err(|_| DropErr::BadAttachDir)?.to_path_buf();
-    let rel_dir = rel_path.display().to_string();
+    let rel_dir = opensidian_lib::vault_path_string(&rel_path);
     // audit #6: every create/rename/unlink below is relative to this dir fd
     let vfs = vaultfs::Vault::open(root).map_err(|_| DropErr::BadAttachDir)?;
     let mut out = Attached::default();
@@ -1127,7 +1166,7 @@ fn write_note_in(root: &Path, ix: &mut Index, name: &str, content: &str) -> Resu
     vaultfs::write_atomic(root, &frel, content.as_bytes()).map_err(|e| e.to_string())?;
     // index == disk: reparse this note, patch its outgoing edges
     // (a NEW key triggers a full in-memory edge rebuild inside upsert)
-    ix.upsert(&rel.display().to_string(), content);
+    ix.upsert(&opensidian_lib::vault_path_string(&rel), content);
     Ok(())
 }
 
@@ -1177,7 +1216,7 @@ fn create_note_in(root: &Path, ix: &mut Index, name: &str, content: &str) -> Res
         })?;
     f.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())?;
-    ix.upsert(&rel.display().to_string(), content);
+    ix.upsert(&opensidian_lib::vault_path_string(&rel), content);
     Ok(())
 }
 
@@ -1223,7 +1262,7 @@ fn move_note_in(root: &Path, ix: &mut Index, old: &str, new: &str) -> Result<(us
     // LATER: file watcher) gets its [[old]] links rewritten too. One walk per
     // rename — the hot paths (search/graph/backlinks) stay disk-free.
     *ix = Index::build(root);
-    let (okey, nkey) = (orel.display().to_string(), nrel.display().to_string());
+    let (okey, nkey) = (opensidian_lib::vault_path_string(&orel), opensidian_lib::vault_path_string(&nrel));
     // counted BEFORE the move, off the freshly-resynced index
     let radius = ix.rename_blast(&okey, &nkey);
     // audit #6: claim (O_EXCL|O_NOFOLLOW) + renameat, both relative to parent
@@ -1259,8 +1298,8 @@ fn move_note_in(root: &Path, ix: &mut Index, old: &str, new: &str) -> Result<(us
    preserving alias, #anchor and embed form (index::rewrite_links). Returns
    how many files were written. Never called without the user's answer. */
 fn update_links_in(root: &Path, ix: &mut Index, old: &str, new: &str) -> usize {
-    let okey = safe_rel(old).map(|p| p.display().to_string()).unwrap_or_default();
-    let nkey = safe_rel(new).map(|p| p.display().to_string()).unwrap_or_default();
+    let okey = safe_rel(old).map(|p| opensidian_lib::vault_path_string(&p)).unwrap_or_default();
+    let nkey = safe_rel(new).map(|p| opensidian_lib::vault_path_string(&p)).unwrap_or_default();
     let mut wrote = 0;
     let Ok(vfs) = vaultfs::Vault::open(root) else { return 0 };
     for (n, c) in ix.rewrite_to(&okey, &nkey) {
@@ -1569,7 +1608,7 @@ const TRASH_DIR: &str = ".trash";
 /// what the UI reports, and what a test reads the original bytes back from.
 fn delete_note_in(root: &Path, ix: &mut Index, name: &str) -> Result<String, String> {
     let rel = safe_rel(name).ok_or("invalid name")?;
-    let key = rel.display().to_string();
+    let key = opensidian_lib::vault_path_string(&rel);
     let frel = note_rel(name).ok_or("invalid name")?;
     // S2: confined to the vault, and never through a symlinked leaf/parent
     let p = note_path_in(root, name, false).ok_or("invalid name")?;
@@ -1613,13 +1652,21 @@ fn vault_get(v: State<Vault>) -> Option<String> {
 
 /* R1.6 vault persistence: ~/.opensidian.json {"last": path, "list": [paths]}.
    Written only on explicit open/create — VAULT_DIR boots (probes) never touch it. */
+fn home_path() -> PathBuf {
+    #[cfg(windows)]
+    return std::env::home_dir().unwrap_or_else(std::env::temp_dir);
+    #[cfg(target_os = "linux")]
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/".into()))
+}
+
 fn cfg_path() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into())).join(".opensidian.json")
+    home_path().join(".opensidian.json")
 }
 
 /// whole config as a Value, read under the shared cfg lock (cfgstore.rs)
 fn cfg_value() -> serde_json::Value {
     // vaultbleed D: a confined window has no rule on the config (sandbox.rs) — ask the spawner
+    #[cfg(target_os = "linux")]
     if let Some(c) = spawner::client() {
         return c.read_cfg().unwrap_or_else(|e| {
             eprintln!("config read failed: {e}");
@@ -1634,10 +1681,7 @@ fn cfg_value() -> serde_json::Value {
    rename. A call site names the key it changes, never a whole Value it read
    earlier (that read is stale by the time another window has written). */
 fn cfg_update(ops: &[cfgstore::Op]) {
-    let r = match spawner::client() {
-        Some(c) => c.cfg(ops), // confined: the unconfined spawner applies the Ops
-        None => cfgstore::update_in(&vaultlock::env_lock_dir(), &cfg_path(), ops).map(|_| ()),
-    };
+    let r = via_spawner!(c => c.cfg(ops), cfgstore::update_in(&vaultlock::env_lock_dir(), &cfg_path(), ops).map(|_| ()));
     if let Err(e) = r {
         eprintln!("config write failed: {e}");
     }
@@ -1818,6 +1862,7 @@ fn pick_vault_inner(app: &tauri::AppHandle, win: &tauri::Window, v: &State<Vault
         // checked BEFORE the restart decision: a bound process never restarts here
         return Err(BindErr::Bound(cur, p).to_string());
     }
+    #[cfg(target_os = "linux")]
     if sandbox::boot_pick_must_restart(sandbox::landlock_enabled(), sandbox::confined_to().is_some()) {
         return restart_into(app, win, &p); // audit #3: never bind unconfined
     }
@@ -1854,7 +1899,7 @@ fn seed_new_vault(dir: &Path) -> std::io::Result<()> {
 /// (create_vault_dir -> open_vault_window).
 fn make_vault_dir(parent: &str, name: &str) -> Result<PathBuf, String> {
     let name = name.trim();
-    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') || !vaultfs::valid_component(std::ffi::OsStr::new(name)) {
         return Err("invalid vault name".into());
     }
     let p = PathBuf::from(parent.trim()).join(name);
@@ -1881,6 +1926,7 @@ fn create_vault(app: tauri::AppHandle, win: tauri::Window, v: State<Vault>, pare
             return Err(format!("this window already has a vault open ({}); create the new vault from a new window", cur.display()));
         }
         let p = make_vault_dir(&parent, &name)?;
+        #[cfg(target_os = "linux")]
         if sandbox::boot_pick_must_restart(sandbox::landlock_enabled(), sandbox::confined_to().is_some()) {
             // audit #3: the folder + seed are made here (sandbox.rs module comment),
             // everything after that happens in the confined process
@@ -1896,11 +1942,9 @@ fn create_vault(app: tauri::AppHandle, win: tauri::Window, v: State<Vault>, pare
 /// it with open_vault_window. This process's root never changes.
 #[tauri::command]
 fn create_vault_dir(parent: String, name: String) -> Result<String, String> {
-    span_timed!("create_vault_dir", match spawner::client() {
-        // confined: the new folder is outside this vault — the spawner makes it
-        Some(c) => c.create(&parent, &name),
-        None => make_vault_dir(&parent, &name).map(|p| p.display().to_string()),
-    })
+    span_timed!("create_vault_dir", via_spawner!(c => c.create(&parent, &name),
+        make_vault_dir(&parent, &name).map(|p| p.display().to_string())
+    ))
 }
 
 /* vaultbleed A: "open another vault" from an open window = a NEW PROCESS on it
@@ -1931,12 +1975,8 @@ async fn open_vault_window(app: tauri::AppHandle, win: tauri::Window, v: State<'
     // switch about work this process does not do.
     let pid = span_timed!(
         "open_vault_window",
-        tauri::async_runtime::spawn_blocking(move || match spawner::client() {
-            // vaultbleed D: a child of a confined window would be confined to THIS
-            // vault for life (landlock is inherited) — the unconfined spawner
-            // starts it, after the same checks (LiveSpawner::open)
-            Some(c) => c.open(&p2, sw2.as_ref()),
-            None => spawn_checked(&p2, sw2.as_ref()),
+        tauri::async_runtime::spawn_blocking(move || {
+            via_spawner!(c => c.open(&p2, sw2.as_ref()), spawn_checked(&p2, sw2.as_ref()))
         })
         .await
         .map_err(|e| e.to_string())
@@ -1993,6 +2033,7 @@ async fn await_switch(app: &tauri::AppHandle, p: &Path, pid: u32, sw: &spawn::Sw
 }
 
 /// a boot-picker restart is in flight: a second pick is refused, not doubled
+#[cfg(target_os = "linux")]
 static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /* audit #3 (sandbox.rs module comment): the boot picker of an UNCONFINED
@@ -2004,6 +2045,7 @@ static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
    that the picker shows while the child boots. If the child dies, this window
    stays and the error goes to stderr. Nothing in the vault is read or written
    in this process. */
+#[cfg(target_os = "linux")]
 fn restart_into(app: &tauri::AppHandle, win: &tauri::Window, p: &Path) -> Result<String, String> {
     use std::sync::atomic::Ordering::SeqCst;
     if RESTARTING.swap(true, SeqCst) {
@@ -2191,8 +2233,10 @@ fn spawn_checked(p: &Path, sw: Option<&spawn::Switch>) -> Result<u32, String> {
 /// vaultbleed D: what the unconfined spawner (spawner.rs) does for a confined
 /// window. Every check runs HERE again — the request comes from a process the
 /// sandbox exists to distrust.
+#[cfg(target_os = "linux")]
 struct LiveSpawner;
 
+#[cfg(target_os = "linux")]
 impl spawner::Handler for LiveSpawner {
     fn open(&self, p: &Path, sw: Option<&spawn::Switch>) -> Result<u32, String> {
         spawn_checked(p, sw)
@@ -2292,6 +2336,7 @@ fn save_debounce_ms() -> u64 {
 /// Deny system trees and any dot-component (hidden dirs, `..`); /workspace
 /// and $HOME stay browsable even when they sit under a denied prefix (e.g.
 /// HOME=/root). /, /home, /mnt, /media, /run/media, /tmp remain open.
+#[cfg(target_os = "linux")]
 fn picker_allows(p: &Path) -> bool {
     const DENY: [&str; 8] = ["/proc", "/sys", "/dev", "/etc", "/usr", "/boot", "/root", "/var"];
     if !p.is_absolute() {
@@ -2313,6 +2358,21 @@ fn picker_allows(p: &Path) -> bool {
         }
     }
     !DENY.iter().any(|d| p.starts_with(d))
+}
+
+#[cfg(windows)]
+fn picker_allows(p: &Path) -> bool {
+    if !p.is_absolute() {
+        return false;
+    }
+    p.components().all(|component| match component {
+        Component::Normal(name) => !name.to_string_lossy().starts_with('.') && vaultfs::valid_component(name),
+        Component::Prefix(prefix) => matches!(prefix.kind(),
+            std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+            | std::path::Prefix::UNC(_, _) | std::path::Prefix::VerbatimUNC(_, _)),
+        Component::RootDir => true,
+        _ => false,
+    })
 }
 
 /* ---- vaultarg: `opensidian <dir>` opens <dir> (contract docs/vaultarg/README.md) ----
@@ -2407,7 +2467,7 @@ fn argv_vault(args: &[std::ffi::OsString], env_set: bool) -> Option<PathBuf> {
 
 #[tauri::command]
 fn home_dir() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/".into())
+    home_path().to_string_lossy().into_owned()
 }
 
 /// S1: the only way an external URL leaves the app — the webview never
@@ -2420,6 +2480,9 @@ fn check_external(url: &str) -> Result<(), String> {
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
     check_external(&url)?;
+    #[cfg(windows)]
+    return windows::open_url(&url);
+    #[cfg(target_os = "linux")]
     // std::process::Command only — no shell, no opener plugin. Missing xdg-open
     // (headless smoke, minimal hosts) is a plain Err, never a fallback.
     std::process::Command::new("xdg-open")
@@ -2434,16 +2497,10 @@ fn open_external(url: String) -> Result<(), String> {
 
 #[tauri::command]
 fn list_dirs(path: String) -> Vec<String> {
-    span_timed!("list_dirs", match spawner::client() {
-        // vaultbleed D: a confined window has no right to list outside its
-        // vault (no $HOME ReadDir — it was recursive, so it listed every
-        // other vault too); the unconfined spawner lists for its picker
-        Some(c) => c.list_dirs(&path).unwrap_or_else(|e| {
-            eprintln!("[spawner] list_dirs {path}: {e}");
-            vec![]
-        }),
-        None => list_dirs_here(&path),
-    })
+    span_timed!("list_dirs", via_spawner!(c => c.list_dirs(&path).unwrap_or_else(|e| {
+        eprintln!("[spawner] list_dirs {path}: {e}");
+        vec![]
+    }), list_dirs_here(&path)))
 }
 
 /// the picker listing itself (S4 rules), in-process or in the spawner
@@ -3363,10 +3420,7 @@ fn link_mention_in(
 const LS: &str = "localStorage";
 
 fn mint_vault_id() -> Option<String> {
-    use std::io::Read;
-    let mut b = [0u8; 8];
-    fs::File::open("/dev/urandom").ok()?.read_exact(&mut b).ok()?;
-    Some(b.iter().map(|x| format!("{x:02x}")).collect())
+    opensidian_lib::os_random_hex().ok()
 }
 
 /// mint false (the load path) only READS: opening a vault writes nothing to
@@ -3687,6 +3741,7 @@ fn plugins_state(v: State<Vault>, otel: Option<perf::Ctx>) -> Result<serde_json:
 /// across another flip (a trust-OFF: kill_all + close_all) is discarded with an
 /// error, nothing written (desk_proc::trust_write).
 /// async: tauri runs it off the main thread, which the open dialog needs.
+#[cfg(target_os = "linux")]
 #[tauri::command]
 async fn plugins_set(
     win: tauri::Window,
@@ -3790,6 +3845,7 @@ fn plugin_vfs(
    args after map_arg, cwd after map_cwd, env keys. Deny = EPERM, nothing
    forked. scripts/consent-nobypass.sh fails the build if any path reaches
    desk_proc::start without that question. */
+#[cfg(target_os = "linux")]
 #[tauri::command]
 async fn desk_proc_spawn(
     win: tauri::Window,
@@ -3838,6 +3894,7 @@ async fn desk_proc_spawn(
     Ok(serde_json::json!({ "id": id, "pid": pid }))
 }
 
+#[cfg(target_os = "linux")]
 #[tauri::command]
 async fn desk_proc_read(id: u64, wait_ms: Option<u64>) -> Result<desk_proc::Chunk, String> {
     let run = desk_proc::get(id)?;
@@ -3849,17 +3906,20 @@ async fn desk_proc_read(id: u64, wait_ms: Option<u64>) -> Result<desk_proc::Chun
     Ok(c)
 }
 
+#[cfg(target_os = "linux")]
 #[tauri::command]
 fn desk_proc_write(id: u64, data: String) -> Result<(), String> {
     span_timed!("desk_proc_write", desk_proc::get(id)?.write(&desk_proc::latin1_to_bytes(&data)))
 }
 
+#[cfg(target_os = "linux")]
 #[tauri::command]
 fn desk_proc_end(id: u64) -> Result<(), String> {
     span_timed!("desk_proc_end", desk_proc::get(id)?.end());
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 #[tauri::command]
 fn desk_proc_kill(id: u64, signal: Option<String>) -> Result<bool, String> {
     let sig = desk_proc::sig_num(signal.as_deref().unwrap_or("SIGTERM")).ok_or("ERR_UNKNOWN_SIGNAL")?;
@@ -3873,6 +3933,7 @@ fn desk_proc_kill(id: u64, signal: Option<String>) -> Result<bool, String> {
    register run under the lifecycle lock plugins_set holds across a trust-OFF
    (flag write, close_all), so a listen that passed its check cannot register
    after close_all and stay bound (desk_net::listen_trusted). */
+#[cfg(target_os = "linux")]
 #[tauri::command]
 fn desk_net_listen(v: State<Vault>, host: Option<String>, port: u16) -> Result<serde_json::Value, String> {
     let root = cur_vault(&v).ok_or("no vault open")?;
@@ -3890,6 +3951,7 @@ fn desk_net_listen(v: State<Vault>, host: Option<String>, port: u16) -> Result<s
     Ok(serde_json::json!({ "id": id, "port": s.port, "address": s.address }))
 }
 
+#[cfg(target_os = "linux")]
 #[tauri::command]
 async fn desk_net_accept(id: u64, wait_ms: Option<u64>) -> Result<desk_net::Batch, String> {
     let s = desk_net::srv(id)?;
@@ -3901,12 +3963,14 @@ async fn desk_net_accept(id: u64, wait_ms: Option<u64>) -> Result<desk_net::Batc
     Ok(b)
 }
 
+#[cfg(target_os = "linux")]
 #[tauri::command]
 fn desk_net_close(id: u64) -> Result<(), String> {
     span_timed!("desk_net_close", desk_net::close_srv(id));
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 #[tauri::command]
 async fn desk_sock_read(id: u64, wait_ms: Option<u64>) -> Result<desk_net::Data, String> {
     let c = desk_net::conn(id)?;
@@ -3914,17 +3978,20 @@ async fn desk_sock_read(id: u64, wait_ms: Option<u64>) -> Result<desk_net::Data,
     tauri::async_runtime::spawn_blocking(move || c.read(wait)).await.map_err(|e| e.to_string())
 }
 
+#[cfg(target_os = "linux")]
 #[tauri::command]
 fn desk_sock_write(id: u64, data: String) -> Result<(), String> {
     span_timed!("desk_sock_write", desk_net::conn(id)?.write(&desk_proc::latin1_to_bytes(&data)))
 }
 
+#[cfg(target_os = "linux")]
 #[tauri::command]
 fn desk_sock_end(id: u64) -> Result<(), String> {
     span_timed!("desk_sock_end", desk_net::conn(id)?.end());
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 #[tauri::command]
 fn desk_sock_destroy(id: u64) -> Result<(), String> {
     span_timed!("desk_sock_destroy", desk_net::forget_conn(id));
@@ -3935,6 +4002,7 @@ fn desk_sock_destroy(id: u64) -> Result<(), String> {
    Same gate as child_process and listeners: the vault's trust flip, checked on
    every request. Stock requestUrl reaches any host without CORS; ours does that
    for http://, https:// is refused until a TLS client is a pinned dependency. */
+#[cfg(target_os = "linux")]
 #[tauri::command]
 async fn desk_http_request(v: State<'_, Vault>, req: desk_http::Req) -> Result<desk_http::Resp, String> {
     let root = cur_vault(&v).ok_or("no vault open")?;
@@ -3970,6 +4038,7 @@ async fn desk_http_request(v: State<'_, Vault>, req: desk_http::Req) -> Result<d
    meanwhile does not refuse it. R4: xdg-open (asked or not) runs in "/" with PATH cut to its
    absolute entries (desk_proc::Launch). R5: the question is consent::open_question — it names
    the target, says opening it may run it, and does not claim a plugin asks. */
+#[cfg(target_os = "linux")]
 #[tauri::command]
 async fn desk_shell(win: tauri::Window, v: State<'_, Vault>, op: String, target: String) -> Result<(), String> {
     let root = cur_vault(&v).ok_or("no vault open")?;
@@ -5999,6 +6068,7 @@ static QUIT_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 static QUIT_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static QUIT_T0: OnceLock<std::time::Instant> = OnceLock::new();
 /// write end of the SIGTERM self-pipe (-1 = no handler installed)
+#[cfg(target_os = "linux")]
 static TERM_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -6020,6 +6090,7 @@ fn quit_step(armed: bool, already_asked: bool) -> QuitStep {
 
 /// SIGTERM back to its default disposition and re-raised: the exit status a
 /// TERM'd process has always had
+#[cfg(target_os = "linux")]
 fn term_default() -> ! {
     unsafe {
         libc::signal(libc::SIGTERM, libc::SIG_DFL);
@@ -6037,12 +6108,14 @@ fn quit_request(app: &tauri::AppHandle, why: &str) -> bool {
     match quit_step(armed, asked) {
         QuitStep::Now => {
             eprintln!("[quit] {why}: UI not armed, no flush to wait for");
+            #[cfg(target_os = "linux")]
             if why == "SIGTERM" {
                 term_default();
             }
             true
         }
         QuitStep::Repeat => {
+            #[cfg(target_os = "linux")]
             if why == "SIGTERM" {
                 eprintln!("[quit] second SIGTERM while flushing: exiting now");
                 term_default();
@@ -6089,6 +6162,7 @@ fn quit_ready(app: tauri::AppHandle, dirty: Option<u32>) {
     app.exit(0);
 }
 
+#[cfg(target_os = "linux")]
 extern "C" fn on_term(_: libc::c_int) {
     // async-signal-safe: one write(2) to the self-pipe, nothing else
     let fd = TERM_FD.load(std::sync::atomic::Ordering::SeqCst);
@@ -6101,6 +6175,7 @@ extern "C" fn on_term(_: libc::c_int) {
 /// SIGTERM -> self-pipe -> a plain thread -> quit_request. The handler itself
 /// only writes one byte; a caught disposition resets to default across exec, so
 /// processes we spawn (desk_proc) keep the stock SIGTERM.
+#[cfg(target_os = "linux")]
 fn install_term(app: tauri::AppHandle) {
     let mut fds = [0 as libc::c_int; 2];
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -6240,6 +6315,10 @@ fn set_zoom_cfg(level: f64) {
 /// admitted tauri://<any host>. The image scheme is a subresource (<img src>),
 /// never a navigation target, so it is not listed.
 fn nav_allowed(u: &tauri::Url) -> bool {
+    #[cfg(windows)]
+    return u.scheme() == "http" && u.host_str() == Some("tauri.localhost") && u.port().is_none()
+        && u.username().is_empty() && u.password().is_none();
+    #[cfg(target_os = "linux")]
     u.scheme() == "tauri" && u.host_str() == Some("localhost") && u.port().is_none()
 }
 
@@ -6250,6 +6329,7 @@ fn main() {
     perf::mark_start();
     // vaultbleed D: `opensidian --opensidian-spawner` is the unconfined helper a
     // confined window started (spawner.rs) — it serves fd 0 and is nothing else
+    #[cfg(target_os = "linux")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(spawner::ARG)) {
         std::process::exit(spawner::run(&LiveSpawner));
     }
@@ -6285,7 +6365,7 @@ fn main() {
     //   RUSTIDIAN_LL_ALONE          -> OPENSIDIAN_LL_ALONE (test only)
     //   RUSTIDIAN_OTELSINK_CHILD    -> OPENSIDIAN_OTELSINK_CHILD (test only)
     //   localStorage rustidian.graphRenderer -> opensidian.graphRenderer (hidden dev knob)
-    migrate::run_home(&PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into())));
+    migrate::run_home(&home_path());
     // VAULT_DIR (probes/tests) wins; else the argv vault (vaultarg, README §2) —
     // resolved HERE, before sandbox::enforce below; else last persisted vault if
     // still a dir (R1.6)
@@ -6308,6 +6388,7 @@ fn main() {
     // landlock: OPT-IN since 2026-09-30 (operator). OPENSIDIAN_LANDLOCK=1 confines
     // the whole process tree to the vault before webkit spawns;
     // OPENSIDIAN_NO_LANDLOCK wins. Both switches are named ONCE, in sandbox.rs.
+    #[cfg(target_os = "linux")]
     if sandbox::landlock_enabled() {
         if let Some(p) = &init {
             // vaultbleed D: the unconfined spawner, started BEFORE the ruleset
@@ -6393,6 +6474,7 @@ fn main() {
             spawn_watcher(app.handle().clone());
             #[cfg(feature = "devui")]
             devui::start(app.handle().clone()); // goal devui: no-op without OPENSIDIAN_DEV_UI
+            #[cfg(target_os = "linux")]
             install_term(app.handle().clone()); // tab-dataloss: SIGTERM flushes, bounded
             // item 14: a switch-started window whose UI never calls switch_ready
             // is still shown (and frees the old window) after SWITCH_FALLBACK
@@ -6555,9 +6637,22 @@ fn main() {
             read_workspace, write_workspace,
             outline, outgoing, backlinks_ctx, unlinked_mentions, link_mention, get_rside_tab, set_rside_tab, vault_id, ls_get, ls_set, get_theme, set_theme,
             snippets_scan, snippets_enabled, snippet_css, set_snippet_enabled,
-            plugins_state, plugins_set, plugin_io, plugin_vfs, desk_proc_spawn, desk_proc_read, desk_proc_write, desk_proc_end, desk_proc_kill,
-            desk_net_listen, desk_net_accept, desk_net_close, desk_sock_read, desk_sock_write, desk_sock_end, desk_sock_destroy,
-            desk_http_request, desk_shell,
+            plugins_state, plugin_io, plugin_vfs,
+            #[cfg(target_os = "linux")] plugins_set,
+            #[cfg(target_os = "linux")] desk_proc_spawn,
+            #[cfg(target_os = "linux")] desk_proc_read,
+            #[cfg(target_os = "linux")] desk_proc_write,
+            #[cfg(target_os = "linux")] desk_proc_end,
+            #[cfg(target_os = "linux")] desk_proc_kill,
+            #[cfg(target_os = "linux")] desk_net_listen,
+            #[cfg(target_os = "linux")] desk_net_accept,
+            #[cfg(target_os = "linux")] desk_net_close,
+            #[cfg(target_os = "linux")] desk_sock_read,
+            #[cfg(target_os = "linux")] desk_sock_write,
+            #[cfg(target_os = "linux")] desk_sock_end,
+            #[cfg(target_os = "linux")] desk_sock_destroy,
+            #[cfg(target_os = "linux")] desk_http_request,
+            #[cfg(target_os = "linux")] desk_shell,
             plugin_store::store_list, plugin_store::store_detail, plugin_store::store_install, plugin_store::store_uninstall,
             updates::update_check,
             themes_scan, theme_css, get_css_theme, set_css_theme, theme_seed_report, vault_css_watch,
@@ -6574,7 +6669,7 @@ fn main() {
         .expect("tauri run");
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
@@ -11467,7 +11562,7 @@ fn psg_probe() -> bool {
    breaks: the in-memory index of the vault that is OPEN equals that vault's
    disk — nothing that exists only in the other vault, in tag_counts, in the
    note list, or in search. */
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod vaultbleed_tests {
     use super::*;
     use std::sync::Arc;
@@ -11699,7 +11794,7 @@ mod vaultbleed_tests {
 
 /// goal devui — the release guard's in-tree half: the dev-only UI hot reload can
 /// never ride along in a default (= release) build.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod devui_guard {
     const CARGO_TOML: &str = include_str!("../Cargo.toml");
     const MAIN_RS: &str = include_str!("main.rs");

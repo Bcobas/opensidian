@@ -1,0 +1,52 @@
+name: Windows build
+
+on:
+  push:
+    branches: [develop, windows-port]
+    paths:
+      - 'src-tauri/**'
+      - 'ui/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'src-tauri/**'
+      - 'ui/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-2025
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.0
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pinned Rust and Tauri CLI
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          $url = 'https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v2.11.4/cargo-tauri-x86_64-pc-windows-msvc.zip'
+          $expected = '0743e30a661a35d63339b24cf63828f97ba5389a1d7f13b368a542794dd0a3f3'
+          $archive = Join-Path $env:RUNNER_TEMP tauri-cli.zip
+          $directory = Join-Path $env:RUNNER_TEMP tauri-cli
+          Invoke-WebRequest $url -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) { throw 'Tauri CLI checksum mismatch' }
+          Expand-Archive $archive $directory
+          $cli = Get-ChildItem $directory -Recurse -Filter cargo-tauri.exe | Select-Object -First 1
+          if (!$cli) { throw 'Tauri CLI executable missing from archive' }
+          $cli.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Test the vault backend
+        working-directory: src-tauri
+        run: cargo test --release --locked --target x86_64-pc-windows-msvc --lib
+      - name: Build NSIS installer
+        run: cargo tauri build --ci --target x86_64-pc-windows-msvc -- --locked
+      - name: Upload installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: Opensidian-Windows-x64
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error

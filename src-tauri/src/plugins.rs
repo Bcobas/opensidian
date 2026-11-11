@@ -149,7 +149,7 @@ pub fn is_trusted(cfg: &serde_json::Value, root: &Path) -> bool {
 /// BB1 (PR #42 round 11): the trust check for a key computed earlier (trust_key canonicalizes the
 /// vault root: a path lookup, done before the lifecycle lock by desk_shell)
 pub fn is_trusted_key(cfg: &serde_json::Value, key: &str) -> bool {
-    cfg["plugins_trusted"][key].as_bool() == Some(true)
+    cfg!(target_os = "linux") && cfg["plugins_trusted"][key].as_bool() == Some(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +277,7 @@ pub fn read_styles(root: &Path, id: &str) -> Result<Option<String>, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

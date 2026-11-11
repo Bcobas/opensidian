@@ -78,8 +78,8 @@ fn walk(dir: &Path, base: &Path, out: &mut Vec<String>, depth: usize, keep: fn(&
             walk(&p, base, out, depth + 1, keep);
         } else if t.is_file() && keep(n) {
             if let Ok(rel) = p.strip_prefix(base) {
-                if let Some(s) = rel.to_str() {
-                    out.push(s.to_string());
+                if rel.to_str().is_some() {
+                    out.push(crate::vault_path_string(rel));
                 }
             }
         }
@@ -404,10 +404,10 @@ pub fn attach(root: &Path, path: &str, data_b64: &str) -> Result<String, String>
         let _ = v.unlink(&rel);
         return Err(e(x));
     }
-    Ok(rel.to_string_lossy().into_owned())
+    Ok(crate::vault_path_string(&rel))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::fs;
