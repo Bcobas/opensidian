@@ -22,10 +22,11 @@ Download one from the [v0.9.2 release](https://github.com/jpzk/opensidian/releas
 
 Download the unsigned NSIS installer from a successful run of the [Windows build workflow](https://github.com/Bcobas/opensidian/actions/workflows/windows.yml). The installer uses Microsoft Edge WebView2. Community plugins and Landlock are unavailable on Windows.
 
-To open a standalone `.md`, `.markdown`, or `.txt` file, right-click it in Explorer and choose **Open with → Opensidian**. You can also pass a quoted file path to `opensidian.exe`. The document opens in its own window without creating a vault.
+To open a standalone `.md`, `.markdown`, `.txt`, or `.pdf` file, right-click it in Explorer and choose **Open with → Opensidian**. You can also pass a quoted file path to `opensidian.exe`. The document opens in its own window without creating a vault.
 
 - **Markdown:** use **Edit** and **Preview** to switch views. **Save** (Ctrl+S) updates the original file. If the file changed on disk, save your draft as a copy or reload the original. Relative images and links to Markdown or text files resolve within the document folder.
 - **Text:** use **Convert to Markdown** to edit or preview the draft, then **Save as Markdown**. The app creates a new UTF-8 Markdown file next to the original and picks an available name if one already exists. The source can be UTF-8 or UTF-16 with a byte-order mark.
+- **PDF:** use the page controls to browse the original. Enter pages or ranges such as `1-3, 6`, or leave the field blank for all pages. **Convert to Markdown** opens an editable draft beside the original. **Save as Markdown** creates a sibling `.md` file with an available name. Conversion extracts selectable text. Scanned pages without a text layer require OCR, and complex layouts such as tables or columns may need editing.
 
 To build locally, install the MSVC C++ build tools, WebView2, Rust 1.98.0, and Tauri CLI 2.11.4. From the repository root, run:
 

@@ -4,3 +4,4 @@ ui/census.js merge=union
 .gitignore merge=union
 # built-in themes are byte-exact upstream files (sha256-pinned in builtins.rs): never normalise line endings
 src-tauri/themes/** -text
+src-tauri/tests/fixtures/reader/*.pdf binary

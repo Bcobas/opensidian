@@ -8,16 +8,18 @@ use std::sync::{
     Mutex,
 };
 
+use hayro::hayro_syntax::Pdf;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
 
-use crate::{index::MAX_NOTE_BYTES, nav_allowed, vaultfs};
+use crate::{index::MAX_NOTE_BYTES, nav_allowed, pdf, pdf_text, vaultfs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Kind {
     Markdown,
     Text,
+    Pdf,
 }
 
 fn kind(path: &Path) -> Option<Kind> {
@@ -25,6 +27,7 @@ fn kind(path: &Path) -> Option<Kind> {
     match ext.as_str() {
         "md" | "markdown" => Some(Kind::Markdown),
         "txt" => Some(Kind::Text),
+        pdf::PDF_EXT => Some(Kind::Pdf),
         _ => None,
     }
 }
@@ -116,7 +119,12 @@ struct OpenedDocument {
     parent: PathBuf,
     name: PathBuf,
     kind: Kind,
-    snapshot: Snapshot,
+    content: Content,
+}
+
+enum Content {
+    Text(Snapshot),
+    Pdf(Pdf),
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -128,7 +136,7 @@ enum SaveResult {
 
 impl OpenedDocument {
     fn open(path: &Path) -> io::Result<Self> {
-        let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "expected a Markdown or text file path");
+        let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "expected a Markdown, text or PDF file path");
         let kind = kind(path).ok_or_else(invalid)?;
         if matches!(
             path.components().next(),
@@ -143,25 +151,45 @@ impl OpenedDocument {
         let parent = path.parent().ok_or_else(invalid)?.to_owned();
         let name = PathBuf::from(path.file_name().ok_or_else(invalid)?);
         let directory = vaultfs::Vault::open(&parent)?;
-        let snapshot = Snapshot::read(directory.open_read(&name)?)?;
-        Ok(Self { directory, parent, name, kind, snapshot })
+        let file = directory.open_read(&name)?;
+        let content = if kind == Kind::Pdf {
+            let bytes = read_bytes(file, pdf::MAX_PDF_BYTES)?;
+            let pdf = pdf::parse(bytes).filter(|pdf| !pdf.pages().is_empty()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "the PDF is invalid or could not be opened")
+            })?;
+            Content::Pdf(pdf)
+        } else {
+            Content::Text(Snapshot::read(file)?)
+        };
+        Ok(Self { directory, parent, name, kind, content })
     }
 
     fn save(&mut self, text: String) -> io::Result<SaveResult> {
         if self.kind != Kind::Markdown {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "use Save as Markdown for text files"));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "use Save as Markdown to export a copy"));
         }
-        if self.snapshot.text == text {
+        let Content::Text(snapshot) = &mut self.content else { unreachable!("Markdown content") };
+        if snapshot.text == text {
             return Ok(SaveResult::Saved);
         }
-        let bytes = self.snapshot.encode(&text);
+        let bytes = snapshot.encode(&text);
         check_size(bytes.len())?;
-        if !self.directory.replace_if_unchanged(&self.name, &self.snapshot.raw, &bytes)? {
+        if !self.directory.replace_if_unchanged(&self.name, &snapshot.raw, &bytes)? {
             return Ok(SaveResult::Changed);
         }
-        self.snapshot.raw = bytes;
-        self.snapshot.text = text;
+        snapshot.raw = bytes;
+        snapshot.text = text;
         Ok(SaveResult::Saved)
+    }
+
+    fn pdf_page(&self, page: usize, width: u32) -> Option<Vec<u8>> {
+        let Content::Pdf(pdf) = &self.content else { return None };
+        pdf::page_png(pdf, page, width)
+    }
+
+    fn convert_pdf(&self, selection: &str) -> Result<pdf_text::Conversion, String> {
+        let Content::Pdf(pdf) = &self.content else { return Err("Expected a PDF document".to_owned()) };
+        pdf_text::convert(pdf, selection)
     }
 
     fn export(&self, text: &str) -> io::Result<String> {
@@ -254,6 +282,7 @@ impl Reader {
 struct DocumentView {
     kind: Kind,
     text: String,
+    pages: usize,
 }
 
 #[tauri::command]
@@ -261,8 +290,19 @@ fn standalone_document(reader: State<'_, Reader>) -> Result<DocumentView, String
     reader.ready.store(true, Ordering::Release);
     reader.with_file(|doc| {
         eprintln!("[reader] opened standalone document");
-        Ok(DocumentView { kind: doc.kind, text: doc.snapshot.text.clone() })
+        let (text, pages) = match &doc.content {
+            Content::Text(snapshot) => (snapshot.text.clone(), 0),
+            Content::Pdf(pdf) => (String::new(), pdf.pages().len()),
+        };
+        Ok(DocumentView { kind: doc.kind, text, pages })
     })
+}
+
+#[tauri::command]
+async fn convert_reader_pdf(app: tauri::AppHandle, selection: String) -> Result<pdf_text::Conversion, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<Reader>().with_file(|doc| doc.convert_pdf(&selection))
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -285,9 +325,10 @@ fn export_reader_markdown(reader: State<'_, Reader>, text: String) -> Result<Str
 #[tauri::command]
 fn reload_reader_document(reader: State<'_, Reader>) -> Result<String, String> {
     reader.with_file(|doc| {
-        doc.snapshot = Snapshot::read(doc.directory.open_read(&doc.name).map_err(|e| e.to_string())?)
+        let Content::Text(snapshot) = &mut doc.content else { return Err("Expected a text document".to_owned()) };
+        *snapshot = Snapshot::read(doc.directory.open_read(&doc.name).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-        Ok(doc.snapshot.text.clone())
+        Ok(snapshot.text.clone())
     })
 }
 
@@ -307,6 +348,16 @@ fn open_reader_document(reader: State<'_, Reader>, target: String) -> Result<(),
 #[tauri::command]
 fn close_reader(window: tauri::WebviewWindow) -> Result<(), String> {
     window.destroy().map_err(|e| e.to_string())
+}
+
+fn image_response(result: Option<(&'static str, Vec<u8>)>) -> tauri::http::Response<Vec<u8>> {
+    let response = tauri::http::Response::builder()
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "no-store");
+    match result {
+        Some((mime, bytes)) => response.status(200).header("Content-Type", mime).body(bytes),
+        None => response.status(404).body(Vec::new()),
+    }.expect("reader image response")
 }
 
 pub fn run(path: &Path, mut context: tauri::Context<Wry>) {
@@ -335,20 +386,28 @@ pub fn run(path: &Path, mut context: tauri::Context<Wry>) {
                 }
             }
         })
-        .register_uri_scheme_protocol(crate::IMG_SCHEME, |context, request| {
+        .register_asynchronous_uri_scheme_protocol(crate::IMG_SCHEME, |context, request, responder| {
             let path = request.uri().path().trim_start_matches('/');
+            if path == "reader-page" {
+                let Some((page, width)) = pdf::parse_query(request.uri().query()) else {
+                    return responder.respond(image_response(None));
+                };
+                let app = context.app_handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let png = app.state::<Reader>().with_file(|doc| Ok(doc.pdf_page(page, width))).ok().flatten();
+                    if png.is_some() {
+                        eprintln!("[reader] rendered PDF page {page}");
+                    }
+                    responder.respond(image_response(png.map(|bytes| ("image/png", bytes))));
+                });
+                return;
+            }
             let result = context.app_handle().state::<Reader>()
                 .with_file(|doc| Ok(doc.image(path))).ok().flatten();
-            let response = tauri::http::Response::builder()
-                .header("X-Content-Type-Options", "nosniff")
-                .header("Cache-Control", "no-store");
-            match result {
-                Some((mime, bytes)) => response.status(200).header("Content-Type", mime).body(bytes),
-                None => response.status(404).body(Vec::new()),
-            }.expect("reader image response")
+            responder.respond(image_response(result));
         })
         .invoke_handler(tauri::generate_handler![
-            standalone_document, preview_reader_markdown, save_reader_markdown, export_reader_markdown,
+            standalone_document, convert_reader_pdf, preview_reader_markdown, save_reader_markdown, export_reader_markdown,
             reload_reader_document, open_reader_link, open_reader_document, close_reader
         ])
         .run(context)
@@ -385,8 +444,9 @@ mod tests {
         fs::write(&path, "\u{feff}# Hola\r\n\r\n**Markdown**").unwrap();
         assert!(is_document_argument(&path));
         let mut doc = OpenedDocument::open(&path).unwrap();
-        assert_eq!(doc.snapshot.text, "# Hola\n\n**Markdown**");
-        assert!(preview(&doc.snapshot.text).contains("<strong>Markdown</strong>"));
+        let Content::Text(snapshot) = &doc.content else { panic!("expected text") };
+        assert_eq!(snapshot.text, "# Hola\n\n**Markdown**");
+        assert!(preview(&snapshot.text).contains("<strong>Markdown</strong>"));
         assert_eq!(doc.save("# Adiós\n\nFin".to_owned()).unwrap(), SaveResult::Saved);
         assert_eq!(fs::read_to_string(&path).unwrap(), "\u{feff}# Adiós\r\n\r\nFin");
         assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
@@ -417,9 +477,11 @@ mod tests {
         fs::write(&path, &original).unwrap();
         fs::write(root.0.join("Notas.md"), "Existing Markdown").unwrap();
         let mut doc = OpenedDocument::open(&path).unwrap();
-        assert_eq!(doc.snapshot.text, "café\n\n- idea");
+        let Content::Text(snapshot) = &doc.content else { panic!("expected text") };
+        let text = snapshot.text.clone();
+        assert_eq!(text, "café\n\n- idea");
         assert!(doc.save("bad".to_owned()).is_err());
-        assert_eq!(doc.export(&doc.snapshot.text).unwrap(), "Notas (2).md");
+        assert_eq!(doc.export(&text).unwrap(), "Notas (2).md");
         assert_eq!(fs::read_to_string(root.0.join("Notas (2).md")).unwrap(), "café\n\n- idea");
         assert_eq!(fs::read_to_string(root.0.join("Notas.md")).unwrap(), "Existing Markdown");
         assert_eq!(fs::read(&path).unwrap(), original);
@@ -434,7 +496,8 @@ mod tests {
         fs::create_dir(root.0.join("docs")).unwrap();
         fs::write(root.0.join("docs/Anexo.md"), b"appendix").unwrap();
         let doc = OpenedDocument::open(&path).unwrap();
-        let html = preview(&doc.snapshot.text);
+        let Content::Text(snapshot) = &doc.content else { panic!("expected text") };
+        let html = preview(&snapshot.text);
         assert_eq!(html.matches("http://opensidian-img.localhost/captura%20uno.png").count(), 2);
         assert!(html.contains("data-note=\"docs/Anexo\""));
         assert_eq!(doc.image("captura%20uno.png").unwrap(), ("image/png", b"image bytes".to_vec()));
@@ -449,12 +512,44 @@ mod tests {
         let directory = root.0.join("a vault.md");
         fs::create_dir(&directory).unwrap();
         assert!(!is_document_argument(&directory));
-        assert!(!is_document_argument(&root.0.join("note.pdf")));
+        assert!(!is_document_argument(&root.0.join("note.png")));
         let path = root.0.join("missing.markdown");
         assert!(is_document_argument(&path));
         assert!(matches!(OpenedDocument::open(&path), Err(e) if e.kind() == io::ErrorKind::NotFound));
         fs::write(&path, [0xff]).unwrap();
         assert!(matches!(OpenedDocument::open(&path), Err(e) if e.kind() == io::ErrorKind::InvalidData));
         assert!(read_bytes(File::open(&path).unwrap(), 0).is_err());
+    }
+
+    #[test]
+    fn renders_and_converts_selected_pdf_pages_to_an_editable_sibling() {
+        let root = Fixture::new();
+        let path = root.0.join("Lectura de café.PDF");
+        let original = include_bytes!("../tests/fixtures/reader/selectable.pdf");
+        fs::write(&path, original).unwrap();
+        fs::write(root.0.join("Lectura de café.md"), "Keep this note").unwrap();
+        assert!(is_document_argument(&path));
+        let mut doc = OpenedDocument::open(&path).unwrap();
+        assert!(doc.pdf_page(3, 240).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(doc.pdf_page(4, 240).is_none());
+
+        let converted = doc.convert_pdf("3, 2-3").unwrap();
+        assert_eq!(converted.omitted, vec![2]);
+        assert_eq!(converted.text, "## Page 3\n\ncafé PDF\nLine two\n");
+        let all = doc.convert_pdf("").unwrap();
+        assert!(all.text.starts_with("## Page 1\n\nFirst page\n"));
+        assert_eq!(all.omitted, vec![2]);
+        assert!(doc.convert_pdf("2").unwrap_err().contains("OCR"));
+        for invalid in ["0", "4", "3-1", "1,", "2-3-4", "+1"] {
+            assert!(doc.convert_pdf(invalid).is_err(), "{invalid}");
+        }
+
+        let edited = format!("{}\nMy note\n", converted.text);
+        assert!(doc.save(edited.clone()).is_err());
+        let exported = doc.export(&edited).unwrap();
+        assert_eq!(exported, "Lectura de café (2).md");
+        assert_eq!(fs::read_to_string(root.0.join(exported)).unwrap(), edited);
+        assert_eq!(fs::read_to_string(root.0.join("Lectura de café.md")).unwrap(), "Keep this note");
+        assert_eq!(fs::read(&path).unwrap().as_slice(), original);
     }
 }

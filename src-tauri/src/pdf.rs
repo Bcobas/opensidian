@@ -84,6 +84,10 @@ pub fn load(p: &Path) -> Option<Pdf> {
     if bytes.len() as u64 > MAX_PDF_BYTES {
         return None;
     }
+    parse(bytes)
+}
+
+pub fn parse(bytes: Vec<u8>) -> Option<Pdf> {
     catch_unwind(AssertUnwindSafe(|| Pdf::new(bytes).ok())).ok().flatten()
 }
 

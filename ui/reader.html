@@ -9,6 +9,10 @@
 </head>
 <body class="standalone-reader">
   <header class="reader-toolbar" id="reader-toolbar" hidden>
+    <label id="reader-pdf-selection" hidden>Pages to convert
+      <input id="reader-ranges" type="text" maxlength="4096" placeholder="All pages" aria-describedby="reader-range-help" title="Enter pages or ranges, e.g. 1-3, 6. Leave blank for all pages.">
+    </label>
+    <span id="reader-range-help" hidden>Enter pages or ranges, e.g. 1-3, 6. Leave blank for all pages.</span>
     <button id="reader-convert" hidden>Convert to Markdown</button>
     <button id="reader-edit" aria-pressed="false">Edit</button>
     <button id="reader-preview" aria-pressed="true">Preview</button>
@@ -16,8 +20,24 @@
     <button id="reader-copy" hidden>Save a Markdown copy</button>
     <button id="reader-reload" hidden>Reload from disk</button>
   </header>
-  <main id="document" class="preview" aria-label="Document preview" tabindex="0"></main>
-  <textarea id="reader-source" aria-label="Document text" spellcheck="false" hidden></textarea>
+  <div class="reader-workspace">
+    <section id="reader-pdf" aria-label="Original PDF" hidden>
+      <nav class="reader-pdf-nav" aria-label="PDF pages">
+        <button id="reader-prev" aria-label="Previous page">‹</button>
+        <label>Page <input id="reader-page-number" type="number" min="1" step="1"></label>
+        <span id="reader-page-count"></span>
+        <button id="reader-next" aria-label="Next page">›</button>
+      </nav>
+      <div class="reader-pdf-page" tabindex="0" aria-label="PDF page">
+        <img id="reader-page-image" alt="">
+        <p id="reader-page-error" role="status" hidden>Could not display this page.</p>
+      </div>
+    </section>
+    <div id="reader-document-pane">
+      <main id="document" class="preview" aria-label="Document preview" tabindex="0"></main>
+      <textarea id="reader-source" aria-label="Document text" spellcheck="false" hidden></textarea>
+    </div>
+  </div>
   <p id="reader-status" role="status" hidden></p>
   <dialog id="reader-discard" aria-labelledby="reader-discard-title">
     <form method="dialog">

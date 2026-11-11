@@ -42,7 +42,7 @@ jobs:
       - name: Test the vault backend
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --lib
-      - name: Test standalone editing and text conversion
+      - name: Test standalone editing and document conversion
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian reader::tests
       - name: Build NSIS installer
@@ -87,7 +87,7 @@ jobs:
           $installer = Get-ChildItem -LiteralPath $bundle -Filter "*-setup.exe" -File | Select-Object -First 1
           $installDir = Join-Path $env:RUNNER_TEMP opensidian-reader-install
           $classes = "HKCU:\Software\Classes"
-          $extensions = ".md", ".markdown", ".txt"
+          $extensions = ".md", ".markdown", ".txt", ".pdf"
           $defaults = @{}
           foreach ($extension in $extensions) {
             $defaults[$extension] = (Get-Item -LiteralPath "$classes\$extension" -ErrorAction SilentlyContinue)?.GetValue("")
@@ -108,10 +108,15 @@ jobs:
           $folder = Join-Path $env:RUNNER_TEMP "standalone notes"
           New-Item -ItemType Directory -Path $folder | Out-Null
           $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $env:RUNNER_TEMP opensidian-reader-webview
-          $testFiles = "Notas de café.MD", "Texto de prueba.TXT"
+          $testFiles = "Notas de café.MD", "Texto de prueba.TXT", "Lectura de prueba.PDF"
           foreach ($name in $testFiles) {
             $document = Join-Path $folder $name
-            Set-Content -LiteralPath $document -Value "# Reader smoke test"
+            $isPdf = $name.EndsWith(".PDF")
+            if ($isPdf) {
+              Copy-Item -LiteralPath 'src-tauri/tests/fixtures/reader/selectable.pdf' -Destination $document
+            } else {
+              Set-Content -LiteralPath $document -Value "# Reader smoke test"
+            }
             $before = (Get-FileHash -LiteralPath $document).Hash
             $stderr = Join-Path $env:RUNNER_TEMP "$name.log"
             $app = Start-Process -FilePath $exe -ArgumentList ('"{0}"' -f $document) -WindowStyle Hidden -RedirectStandardError $stderr -PassThru
@@ -120,10 +125,11 @@ jobs:
               do {
                 if ($app.HasExited) { throw "Opensidian exited with status $($app.ExitCode)" }
                 $loaded = Select-String -LiteralPath $stderr -Pattern '^\[reader\] opened standalone document' -Quiet
-                if ($loaded) { break }
+                $displayed = !$isPdf -or (Select-String -LiteralPath $stderr -Pattern '^\[reader\] rendered PDF page 1$' -Quiet)
+                if ($loaded -and $displayed) { break }
                 Start-Sleep -Milliseconds 300
               } while ((Get-Date) -lt $deadline)
-              if (!$loaded) { throw "The reader did not load $name" }
+              if (!$loaded -or !$displayed) { throw "The reader did not load $name" }
               if ((Get-FileHash -LiteralPath $document).Hash -ne $before) { throw "The reader modified $name on open" }
             } catch {
               Get-Content -LiteralPath $stderr -Tail 20

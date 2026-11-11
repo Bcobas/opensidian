@@ -729,6 +729,52 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
 .preview { flex: 1 1 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
            cursor: default }   /* R22 */
 .standalone-reader { flex-direction: column }
+.reader-workspace {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+}
+#reader-document-pane:not([hidden]), #reader-pdf:not([hidden]) {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+#reader-pdf:not([hidden]) + #reader-document-pane { border-inline-start: 1px solid var(--border) }
+.reader-pdf-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+.reader-pdf-page {
+  flex: 1 1 0;
+  overflow: auto;
+  padding: 1rem;
+  text-align: center;
+  background: var(--bg-sidebar);
+}
+.reader-pdf-page img { width: 100%; max-width: 800px; height: auto }
+.standalone-reader input {
+  padding: 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--bg-base);
+  color: inherit;
+  font: inherit;
+}
+#reader-page-number { width: 5rem }
+#reader-ranges { width: 9rem }
+@media (max-width: 620px) {
+  .reader-workspace { flex-direction: column }
+  #reader-pdf:not([hidden]) + #reader-document-pane {
+    border-inline-start: 0;
+    border-top: 1px solid var(--border);
+  }
+}
 .standalone-reader .preview, .standalone-reader #reader-source {
   padding: 1.5rem max(1.25rem, calc((100% - var(--file-line-width)) / 2));
   overflow-wrap: anywhere;

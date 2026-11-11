@@ -10,6 +10,7 @@
   WriteRegStr SHCTX "Software\Classes\.md\OpenWithProgids" "${OPENSIDIAN_MARKDOWN_PROGID}" ""
   WriteRegStr SHCTX "Software\Classes\.markdown\OpenWithProgids" "${OPENSIDIAN_MARKDOWN_PROGID}" ""
   WriteRegStr SHCTX "Software\Classes\.txt\OpenWithProgids" "${OPENSIDIAN_MARKDOWN_PROGID}" ""
+  WriteRegStr SHCTX "Software\Classes\.pdf\OpenWithProgids" "${OPENSIDIAN_MARKDOWN_PROGID}" ""
   !insertmacro UPDATEFILEASSOC
 !macroend
 
@@ -17,6 +18,7 @@
   DeleteRegValue SHCTX "Software\Classes\.md\OpenWithProgids" "${OPENSIDIAN_MARKDOWN_PROGID}"
   DeleteRegValue SHCTX "Software\Classes\.markdown\OpenWithProgids" "${OPENSIDIAN_MARKDOWN_PROGID}"
   DeleteRegValue SHCTX "Software\Classes\.txt\OpenWithProgids" "${OPENSIDIAN_MARKDOWN_PROGID}"
+  DeleteRegValue SHCTX "Software\Classes\.pdf\OpenWithProgids" "${OPENSIDIAN_MARKDOWN_PROGID}"
   DeleteRegKey SHCTX "Software\Classes\${OPENSIDIAN_MARKDOWN_PROGID}"
   !insertmacro UPDATEFILEASSOC
 !macroend

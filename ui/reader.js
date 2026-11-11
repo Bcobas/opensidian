@@ -14,13 +14,22 @@ const copy = $("reader-copy");
 const reload = $("reader-reload");
 const statusLine = $("reader-status");
 const discard = $("reader-discard");
+const pdfPane = $("reader-pdf");
+const documentPane = $("reader-document-pane");
+const ranges = $("reader-ranges");
+const pageNumber = $("reader-page-number");
+const pageImage = $("reader-page-image");
+const pageError = $("reader-page-error");
+const prev = $("reader-prev");
+const next = $("reader-next");
 
 let kind, savedText = "", exportedText = null;
 let editing = false, converting = false, busy = false, conflict = false;
+let pages = 0, currentPage = 1, discardAction;
 let renderId = 0;
 
 function dirty() {
-  return source.value !== savedText;
+  return (kind === "pdf" && converting && exportedText === null) || source.value !== savedText;
 }
 
 function setReaderStatus(message) {
@@ -29,17 +38,36 @@ function setReaderStatus(message) {
 }
 
 function updateActions() {
-  const textFile = kind === "text";
-  convert.hidden = !textFile || converting;
-  edit.hidden = view.hidden = save.hidden = textFile && !converting;
+  const copyOnly = kind !== "markdown";
+  const pdf = kind === "pdf";
+  convert.hidden = !pdf && (!copyOnly || converting);
+  edit.hidden = view.hidden = save.hidden = copyOnly && !converting;
+  documentPane.hidden = pdf && !converting;
   edit.setAttribute("aria-pressed", String(editing));
   view.setAttribute("aria-pressed", String(!editing));
-  save.textContent = textFile ? "Save as Markdown" : "Save";
-  save.disabled = busy || conflict || (textFile ? source.value === exportedText : !dirty());
+  save.textContent = copyOnly ? "Save as Markdown" : "Save";
+  save.disabled = busy || conflict || (copyOnly ? source.value === exportedText : !dirty());
   copy.hidden = reload.hidden = !conflict;
   copy.disabled = reload.disabled = busy;
   edit.disabled = view.disabled = busy;
+  convert.disabled = ranges.disabled = pageNumber.disabled = busy;
+  prev.disabled = busy || currentPage <= 1;
+  next.disabled = busy || currentPage >= pages;
   source.readOnly = busy;
+}
+
+function showPage(number) {
+  if (!Number.isInteger(number) || number < 1 || number > pages) {
+    pageNumber.value = currentPage;
+    return;
+  }
+  currentPage = number;
+  pageNumber.value = number;
+  pageError.hidden = true;
+  pageImage.hidden = false;
+  pageImage.alt = `PDF page ${number}`;
+  pageImage.src = `http://opensidian-img.localhost/reader-page?page=${number}&w=1600`;
+  updateActions();
 }
 
 async function showMode(toEdit) {
@@ -91,14 +119,14 @@ function saveCopy() {
     const text = source.value;
     const name = await invoke("export_reader_markdown", { text });
     savedText = text;
-    if (kind === "text") exportedText = text;
+    if (kind !== "markdown") exportedText = text;
     setReaderStatus("Saved " + name);
   });
 }
 
 function saveDocument() {
   if (save.disabled || save.hidden) return;
-  if (kind === "text") return saveCopy();
+  if (kind !== "markdown") return saveCopy();
   return perform(async () => {
     const text = source.value;
     if (await invoke("save_reader_markdown", { text }) === "changed") {
@@ -111,19 +139,53 @@ function saveDocument() {
   });
 }
 
-function closeDocument() {
-  if (busy) return;
-  if (!dirty()) {
-    invoke("close_reader").catch(setReaderStatus);
-  } else if (!discard.open) {
+function confirmDiscard(title, action) {
+  if (!dirty()) return action();
+  if (!discard.open) {
+    discardAction = action;
+    $("reader-discard-title").textContent = title;
     discard.returnValue = "";
     discard.showModal();
   }
 }
 
+function closeDocument() {
+  if (busy) return;
+  confirmDiscard("Discard your unsaved changes?", () => invoke("close_reader").catch(setReaderStatus));
+}
+
+function convertPdf() {
+  return confirmDiscard("Replace your unsaved Markdown draft?", () => perform(async () => {
+    setReaderStatus("Extracting PDF text…");
+    const result = await invoke("convert_reader_pdf", { selection: ranges.value });
+    converting = true;
+    exportedText = null;
+    source.value = savedText = result.text;
+    await showMode(true);
+    const omitted = result.omitted;
+    const listed = omitted.slice(0, 12).join(", ");
+    const remainder = omitted.length > 12 ? ` and ${omitted.length - 12} more` : "";
+    setReaderStatus(omitted.length ? `No selectable text on pages ${listed}${remainder}.` : "");
+  }));
+}
+
 convert.onclick = () => {
+  if (kind === "pdf") return convertPdf();
   converting = true;
   showMode(true);
+};
+prev.onclick = () => showPage(currentPage - 1);
+next.onclick = () => showPage(currentPage + 1);
+pageNumber.onchange = () => showPage(pageNumber.valueAsNumber);
+pageNumber.addEventListener("keydown", event => {
+  if (event.key === "Enter") showPage(pageNumber.valueAsNumber);
+});
+ranges.addEventListener("keydown", event => {
+  if (event.key === "Enter" && !convert.disabled) convertPdf();
+});
+pageImage.onerror = () => {
+  pageImage.hidden = true;
+  pageError.hidden = false;
 };
 edit.onclick = () => showMode(true);
 view.onclick = () => showMode(false);
@@ -142,7 +204,9 @@ source.addEventListener("input", () => {
   updateActions();
 });
 discard.addEventListener("close", () => {
-  if (discard.returnValue === "discard") invoke("close_reader").catch(setReaderStatus);
+  const action = discardAction;
+  discardAction = null;
+  if (discard.returnValue === "discard") action?.();
 });
 document.addEventListener("keydown", event => {
   if (!kind || discard.open || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
@@ -181,6 +245,15 @@ async function openDocument() {
   kind = opened.kind;
   source.value = savedText = opened.text;
   toolbar.hidden = false;
+  if (kind === "pdf") {
+    pages = opened.pages;
+    pageNumber.max = pages;
+    $("reader-page-count").textContent = `/ ${pages}`;
+    $("reader-pdf-selection").hidden = false;
+    pdfPane.hidden = false;
+    showPage(1);
+    return;
+  }
   await showMode(false);
 }
 
