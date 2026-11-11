@@ -728,6 +728,13 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
    docs/recon-rvcursor/; the operator ask is the requirement. */
 .preview { flex: 1 1 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
            cursor: default }   /* R22 */
+.standalone-reader { flex-direction: column }
+.standalone-reader .preview {
+  padding: 1.5rem max(1.25rem, calc((100% - var(--file-line-width)) / 2));
+  overflow-wrap: anywhere;
+}
+.standalone-reader .preview a:not(.ext) { cursor: default }
+.standalone-reader #reader-status { margin: 0; padding: 1rem 1.25rem }
 /* modeswitch opt6: the view the edit <-> reading switch left stays LAID OUT (ui/main.js
    applyMode): out of flow over the same box, same width, never painted, never hit.
    opt8: while a view is kept BOTH views are out of flow over that box (.vk2), so a toggle

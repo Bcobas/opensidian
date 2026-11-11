@@ -35,6 +35,8 @@ mod plugin_store;
 mod pasteimg;
 mod qscreate;
 mod perf;
+#[cfg(windows)]
+mod reader;
 #[cfg(target_os = "linux")]
 mod sandbox;
 // cp-secrets: app.secretStorage over the OS keyring (Secret Service)
@@ -6323,6 +6325,10 @@ fn nav_allowed(u: &tauri::Url) -> bool {
         && u.username().is_empty() && u.password().is_none()
 }
 
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 fn main() {
     // FIRST STATEMENT IN THE PROCESS, deliberately: the warm-up window (perf.rs,
     // WARMUP_MS) is measured from here, so anything that runs before this stamp
@@ -6366,7 +6372,6 @@ fn main() {
     //   RUSTIDIAN_LL_ALONE          -> OPENSIDIAN_LL_ALONE (test only)
     //   RUSTIDIAN_OTELSINK_CHILD    -> OPENSIDIAN_OTELSINK_CHILD (test only)
     //   localStorage rustidian.graphRenderer -> opensidian.graphRenderer (hidden dev knob)
-    migrate::run_home(&home_path());
     // VAULT_DIR (probes/tests) wins; else the argv vault (vaultarg, README §2) —
     // resolved HERE, before sandbox::enforce below; else last persisted vault if
     // still a dir (R1.6)
@@ -6377,6 +6382,13 @@ fn main() {
     if let Some(e) = sw_err {
         eprintln!("opensidian: {e} — ignored, the window opens normally");
     }
+    #[cfg(windows)]
+    if env_vault.is_none() && switched.is_none() {
+        if let Some(path) = argv_pick(&args).0.map(PathBuf::from).filter(|p| reader::is_document_argument(p)) {
+            return reader::run(&path, app_context());
+        }
+    }
+    migrate::run_home(&home_path());
     let arg_vault = argv_vault(&args, env_vault.is_some());
     let init = env_vault
         .or(arg_vault)
@@ -6438,7 +6450,7 @@ fn main() {
     // at the config default); switch_show/switch_ready reveal it once the UI
     // has entered the vault, SWITCH_FALLBACK reveals it if the UI never does.
     // Only a window that actually holds its vault takes part in a switch.
-    let mut ctx = tauri::generate_context!();
+    let mut ctx = app_context();
     if let (Some(sw), Some(_)) = (switched, &init) {
         if let Some(wc) = ctx.config_mut().app.windows.first_mut() {
             wc.visible = false;

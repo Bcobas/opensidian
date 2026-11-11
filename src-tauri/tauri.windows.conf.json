@@ -11,6 +11,11 @@
     ],
     "icon": [
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/markdown-open-with.nsh"
+      }
+    }
   }
 }

@@ -22,6 +22,8 @@ Download one from the [v0.9.2 release](https://github.com/jpzk/opensidian/releas
 
 Download the unsigned NSIS installer from a successful run of the [Windows build workflow](https://github.com/Bcobas/opensidian/actions/workflows/windows.yml). The installer uses Microsoft Edge WebView2. Community plugins and Landlock are unavailable on Windows.
 
+To read a standalone Markdown file, right-click a `.md` or `.markdown` file in Explorer and choose **Open with → Opensidian**. You can also pass a quoted file path to `opensidian.exe`. Each file opens in a read-only window for that session. The reader uses the selected file, without creating a vault or adding the folder to recent vaults.
+
 To build locally, install the MSVC C++ build tools, WebView2, Rust 1.98.0, and Tauri CLI 2.11.4. From the repository root, run:
 
 ```powershell

@@ -39,9 +39,9 @@ jobs:
           $cli = Get-ChildItem $directory -Recurse -Filter cargo-tauri.exe | Select-Object -First 1
           if (!$cli) { throw 'Tauri CLI executable missing from archive' }
           $cli.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-      - name: Test the vault backend
+      - name: Test vault and standalone document handling
         working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --lib
+        run: cargo test --release --locked --target x86_64-pc-windows-msvc --lib --bin opensidian
       - name: Build NSIS installer
         run: cargo tauri build --ci --target x86_64-pc-windows-msvc -- --locked
       - name: Upload installer
@@ -71,6 +71,53 @@ jobs:
               Start-Sleep -Milliseconds 300
             } while ((Get-Date) -lt $deadline)
             if (!$pageServed -or !$vaultOpened) { throw "The vault or application page did not load" }
+          } catch {
+            Get-Content -LiteralPath $stderr -Tail 20
+            throw
+          } finally {
+            if (!$app.HasExited) { Stop-Process -Id $app.Id }
+          }
+      - name: Test the installed Markdown reader
+        shell: pwsh
+        run: |
+          $bundle = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          $installer = Get-ChildItem -LiteralPath $bundle -Filter "*-setup.exe" -File | Select-Object -First 1
+          $installDir = Join-Path $env:RUNNER_TEMP opensidian-reader-install
+          $classes = "HKCU:\Software\Classes"
+          $defaultBefore = (Get-Item -LiteralPath "$classes\.md" -ErrorAction SilentlyContinue)?.GetValue("")
+          $setup = Start-Process -FilePath $installer.FullName -ArgumentList "/S", "/D=$installDir" -WindowStyle Hidden -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Installer exited with status $($setup.ExitCode)" }
+          $exe = Join-Path $installDir opensidian.exe
+          $progId = "dev.koto.opensidian.Markdown"
+          foreach ($extension in ".md", ".markdown") {
+            $registered = (Get-Item -LiteralPath "$classes\$extension\OpenWithProgids").GetValueNames()
+            if ($registered -notcontains $progId) { throw "Missing Open with registration for $extension" }
+          }
+          $defaultAfter = (Get-Item -LiteralPath "$classes\.md" -ErrorAction SilentlyContinue)?.GetValue("")
+          if ($defaultBefore -ne $defaultAfter) { throw "Installer changed the default Markdown app" }
+          $command = (Get-Item -LiteralPath "$classes\$progId\shell\open\command").GetValue("")
+          if ($command -ne ('"{0}" "%1"' -f $exe)) { throw "Unexpected Markdown open command: $command" }
+
+          $folder = Join-Path $env:RUNNER_TEMP "standalone notes"
+          New-Item -ItemType Directory -Path $folder | Out-Null
+          $document = Join-Path $folder "Notas de café.MD"
+          Set-Content -LiteralPath $document -Value "# Markdown reader smoke test"
+          $before = (Get-FileHash -LiteralPath $document).Hash
+          $stderr = Join-Path $env:RUNNER_TEMP opensidian-reader-stderr.txt
+          $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $env:RUNNER_TEMP opensidian-reader-webview
+          $app = Start-Process -FilePath $exe -ArgumentList ('"{0}"' -f $document) -WindowStyle Hidden -RedirectStandardError $stderr -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(45)
+            do {
+              if ($app.HasExited) { throw "Opensidian exited with status $($app.ExitCode)" }
+              $loaded = Select-String -LiteralPath $stderr -Pattern '^\[markdown\] opened standalone document' -Quiet
+              if ($loaded) { break }
+              Start-Sleep -Milliseconds 300
+            } while ((Get-Date) -lt $deadline)
+            if (!$loaded) { throw "The Markdown reader did not load the document" }
+            if ((Get-FileHash -LiteralPath $document).Hash -ne $before -or (Get-ChildItem -LiteralPath $folder -Force).Count -ne 1) {
+              throw "The reader modified the original file or its folder"
+            }
           } catch {
             Get-Content -LiteralPath $stderr -Tail 20
             throw
