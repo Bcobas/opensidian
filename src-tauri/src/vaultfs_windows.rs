@@ -210,7 +210,7 @@ impl Stage {
         Ok(Self { file, committed: false })
     }
 
-    fn commit(&mut self, parent: &File, name: &OsStr, replace: bool) -> io::Result<()> {
+    fn commit(&mut self, name: &OsStr, replace: bool) -> io::Result<()> {
         rename(&self.file, None, name, replace)?;
         self.committed = true;
         Ok(())
