@@ -41,14 +41,16 @@ fn read_document(path: &Path, limit: u64) -> io::Result<String> {
     Ok(text)
 }
 
-struct Document(Result<String, String>);
+struct Document {
+    html: Result<String, String>,
+}
 
 #[tauri::command]
 fn standalone_markdown(document: State<'_, Document>) -> Result<String, String> {
-    if document.0.is_ok() {
+    if document.html.is_ok() {
         eprintln!("[markdown] opened standalone document");
     }
-    document.0.clone()
+    document.html.clone()
 }
 
 #[tauri::command]
@@ -65,7 +67,7 @@ pub fn run(path: &Path, mut context: tauri::Context<Wry>) {
 
     context.config_mut().app.windows.clear();
     tauri::Builder::default()
-        .manage(Document(content))
+        .manage(Document { html: content })
         .setup(move |app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("reader.html".into()))
                 .title(title)
