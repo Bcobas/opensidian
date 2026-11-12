@@ -474,6 +474,10 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
 #sclear { background: none; color: var(--text-chrome-muted); border: 0; cursor: pointer;
           padding: 0 4px; border-radius: 4px }
 #sclear:hover { color: var(--text-chrome); background: var(--bg-surface) }
+#sscope { margin: 0 6px 6px; padding: 4px 6px; text-align: left; border: 1px solid var(--border);
+          border-radius: 4px; background: var(--bg-sidebar); color: var(--text-chrome);
+          font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer }
+#sscope:hover { background: var(--bg-surface) }
 #sresults { flex: 1; overflow-y: auto; font-size: 12px }
 .sgroup { padding: 5px 8px 2px; color: var(--text-chrome); font-weight: 600; font-size: var(--sidebar-font-size);   /* sidefont: file rows = Q1; .shit snippets keep 12px */
           cursor: pointer; white-space: nowrap; overflow: hidden;

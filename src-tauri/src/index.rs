@@ -819,6 +819,23 @@ impl Index {
         self.rebuild_backlinks();
     }
 
+    #[cfg(windows)]
+    pub fn index_copied_folder(&mut self, root: &Path, folder: &Path) -> std::io::Result<()> {
+        let vault = crate::vaultfs::Vault::open(root)?;
+        vault.with_shell_path(folder, |_, is_dir| {
+            if !is_dir { return Err(std::io::ErrorKind::NotADirectory.into()); }
+            let (mut notes, mut images) = (Vec::new(), Vec::new());
+            walk(&root.join(folder), root, &mut notes, &mut images);
+            self.notes.extend(read_parse_all(root, notes));
+            self.images.extend(images);
+            self.images.sort_unstable();
+            self.images.dedup();
+            self.refresh_names();
+            self.rebuild_backlinks();
+            Ok(())
+        })?
+    }
+
     /// after the key moved: rewrite [[old]] -> [[new]] everywhere. Returns
     /// (name, new content) for every note whose text changed.
     pub fn rewrite_to(&mut self, old: &str, new: &str) -> Vec<(String, String)> {

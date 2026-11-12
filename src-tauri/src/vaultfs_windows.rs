@@ -498,7 +498,10 @@ impl Vault {
             let (parent, name) = self.parent(rel, false)?;
             directory_at(parent.handle(), name, OPEN)?
         };
-        list(&dir)
+        Ok(list_entries(&dir)?.into_iter()
+            .filter(|entry| entry.attributes & ATTR_REPARSE == 0)
+            .map(|entry| (entry.name.to_string_lossy().into_owned(), if entry.is_dir() { "folder" } else { "file" }))
+            .collect())
     }
 
     pub fn p_mkdir(&self, rel: &Path, recursive: bool) -> io::Result<()> {
@@ -527,6 +530,40 @@ impl Vault {
         self.rename_entry(from, to, DIRECTORY)
     }
 
+    /// Publish the copy as a sibling only after every entry was written successfully.
+    pub fn duplicate_dir(&self, from: &Path) -> io::Result<PathBuf> {
+        let (parent, name) = self.parent(from, false)?;
+        let source = directory_at(parent.handle(), name, OPEN)?;
+        let stage_name = format!(".opensidian-copy-{}", crate::os_random_hex()?);
+        let stage = open_at(parent.handle(), OsStr::new(&stage_name), LIST_DIRECTORY | TRAVERSE | DELETE,
+            SHARE_READ | SHARE_WRITE, CREATE, DIRECTORY)?;
+        let result = (|| {
+            copy_entries(&source, &stage, 0)?;
+            let base = name.to_str().expect("validated Windows path component");
+            for n in 1..=10_000 {
+                let suffix = format!(" {n}");
+                let mut units = suffix.len();
+                let end = base.char_indices().find_map(|(at, ch)| {
+                    units += ch.len_utf16();
+                    (units > 255).then_some(at)
+                }).unwrap_or(base.len());
+                let candidate = format!("{}{suffix}", &base[..end]);
+                match rename(&stage, Some(parent.handle()), OsStr::new(&candidate), false) {
+                    Ok(()) => return Ok(from.with_file_name(candidate)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(io::Error::new(io::ErrorKind::AlreadyExists, "no free name for the folder copy"))
+        })();
+        if result.is_err() {
+            if let Err(error) = discard_copy(&stage) {
+                eprintln!("[vault] could not remove incomplete folder copy {stage_name}: {error}");
+            }
+        }
+        result
+    }
+
     fn rename_entry(&self, from: &Path, to: &Path, options: u32) -> io::Result<()> {
         let (source, name) = self.parent(from, false)?;
         let file = open_at(source.handle(), name, DELETE, SHARE_READ, OPEN, options)?;
@@ -544,7 +581,16 @@ impl Vault {
     }
 }
 
-fn list(dir: &File) -> io::Result<Vec<(String, &'static str)>> {
+struct DirEntry {
+    name: OsString,
+    attributes: u32,
+}
+
+impl DirEntry {
+    fn is_dir(&self) -> bool { self.attributes & ATTR_DIRECTORY != 0 }
+}
+
+fn list_entries(dir: &File) -> io::Result<Vec<DirEntry>> {
     let mut storage = [0u64; 8192];
     let length = size_of_val(&storage);
     let mut class = 15; // FileFullDirectoryRestartInfo
@@ -564,13 +610,10 @@ fn list(dir: &File) -> io::Result<Vec<(String, &'static str)>> {
             let next = u32_at(0) as usize;
             let attributes = u32_at(56);
             let name = &bytes[at + 68..at + 68 + u32_at(60) as usize];
-            if attributes & ATTR_REPARSE == 0 {
-                let name: Vec<_> = name.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect();
-                let name = OsString::from_wide(&name);
-                if name != "." && name != ".." {
-                    let kind = if attributes & ATTR_DIRECTORY == 0 { "file" } else { "folder" };
-                    entries.push((name.to_string_lossy().into_owned(), kind));
-                }
+            let name: Vec<_> = name.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect();
+            let name = OsString::from_wide(&name);
+            if name != "." && name != ".." {
+                entries.push(DirEntry { name, attributes });
             }
             if next == 0 {
                 break;
@@ -578,6 +621,37 @@ fn list(dir: &File) -> io::Result<Vec<(String, &'static str)>> {
             at += next;
         }
     }
+}
+
+fn copy_entries(source: &File, target: &File, depth: usize) -> io::Result<()> {
+    if depth >= super::MAX_WALK_DEPTH {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "folder nesting is too deep"));
+    }
+    for entry in list_entries(source)? {
+        if entry.attributes & ATTR_REPARSE != 0 {
+            return Err(refused(Path::new(&entry.name), "cannot copy a link or reparse point"));
+        }
+        if entry.is_dir() {
+            let from = directory_at(source, &entry.name, OPEN)?;
+            let to = directory_at(target, &entry.name, CREATE)?;
+            copy_entries(&from, &to, depth + 1)?;
+        } else {
+            let mut from = regular(open_at(source, &entry.name, READ_DATA, SHARE_READ, OPEN, 0)?)?;
+            let mut to = open_at(target, &entry.name, WRITE_DATA, SHARE_READ, CREATE, 0)?;
+            io::copy(&mut from, &mut to)?;
+            to.sync_all()?;
+        }
+    }
+    Ok(())
+}
+
+fn discard_copy(dir: &File) -> io::Result<()> {
+    for entry in list_entries(dir)? {
+        let access = if entry.is_dir() { DELETE | LIST_DIRECTORY | TRAVERSE } else { DELETE };
+        let child = open_at(dir, &entry.name, access, SHARE_READ, OPEN, 0)?;
+        if entry.is_dir() { discard_copy(&child)?; } else { remove(&child)?; }
+    }
+    remove(dir)
 }
 
 
@@ -625,7 +699,10 @@ mod tests {
     fn rejects_a_junction_and_named_streams() {
         let root = Fixture::new();
         let outside = Fixture::new();
-        let link = root.0.join("junction");
+        let folder = Path::new("folder");
+        std::fs::create_dir(root.0.join(folder)).unwrap();
+        std::fs::write(root.0.join("folder/First.md"), b"staged before the junction").unwrap();
+        let link = root.0.join("folder/junction");
         let result = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command",
                 "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:OPENSIDIAN_TEST_LINK -Target $env:OPENSIDIAN_TEST_TARGET | Out-Null"])
@@ -635,10 +712,12 @@ mod tests {
         assert!(result.success());
         let vault = Vault::open(&root.0).unwrap();
         std::fs::write(outside.0.join("private.md"), b"outside").unwrap();
-        assert!(vault.open_read(Path::new("junction/private.md")).is_err());
-        assert!(vault.with_shell_path(Path::new("junction"), |_, _| ()).is_err());
-        assert!(vault.with_shell_path(Path::new("junction/private.md"), |_, _| ()).is_err());
-        assert!(vault.write_atomic(Path::new("junction/private.md"), b"overwrite", true).is_err());
+        assert!(vault.open_read(Path::new("folder/junction/private.md")).is_err());
+        assert!(vault.with_shell_path(Path::new("folder/junction"), |_, _| ()).is_err());
+        assert!(vault.with_shell_path(Path::new("folder/junction/private.md"), |_, _| ()).is_err());
+        assert!(vault.write_atomic(Path::new("folder/junction/private.md"), b"overwrite", true).is_err());
+        assert!(vault.duplicate_dir(folder).is_err());
+        assert_eq!(vault.p_list(Path::new("")).unwrap(), vec![("folder".into(), "folder")]);
         assert!(vault.write_atomic(Path::new("ordinary.md:hidden"), b"stream", false).is_err());
         assert_eq!(std::fs::read(outside.0.join("private.md")).unwrap(), b"outside");
         std::fs::remove_dir(link).unwrap();

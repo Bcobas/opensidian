@@ -614,6 +614,7 @@ async function rTags() {
 function tagSearch(tag) {                  // pane row / inline pill -> search "tag:<name>"
   if (!sideOpen) cmdToggleSide();
   setPane("search");
+  setSearchFolder(null);
   $("sinput").value = "tag:" + tag;
   clearTimeout(searchT); runSearch();
 }
@@ -1042,6 +1043,28 @@ function scNth(hits, h) {
    census [sr:N] (total hits) while the search pane is showing a query. */
 let searchCount = -1;                       // -1 = no query -> no [sr:] flag
 let searchT = null, searchSeq = 0, searchT0 = -1, searchSp = null;   // searchSp: R18 search_type span of the latest keystroke
+let searchFolder = null;
+function setSearchFolder(folder) {
+  if (folder === searchFolder) return;
+  searchFolder = folder;
+  searchSeq++;
+  searchCount = -1;
+  $("sresults").textContent = "";
+  const scope = $("sscope");
+  scope.hidden = !folder;
+  scope.textContent = folder ? `×  ${folder}` : "";
+  scope.title = folder ? `Clear folder filter: ${folder}` : "";
+  scope.setAttribute("aria-label", scope.title);
+  wsTouch();
+}
+function searchInFolder(folder) {
+  if (!sideOpen) cmdToggleSide();
+  setSearchFolder(folder);
+  setPane("search");
+  $("sinput").select();
+  clearTimeout(searchT);
+  void runSearch();
+}
 async function runSearch() {
   const q = $("sinput").value.trim();
   const seq = ++searchSeq;                  // stale-response guard
@@ -1051,7 +1074,8 @@ async function runSearch() {
     otel.paint(searchSp, { hits: 0 }); searchSp = null; return;
   }
   const st0 = searchT0 >= 0 ? searchT0 : perf.now(); searchT0 = -1;
-  const [hits, cvh] = await Promise.all([inv("search", { query: q }), cvSearch(q).catch(() => [])]);   // cvf-links CVR-A-101: + canvas text cards
+  const folder = searchFolder;
+  const [hits, cvh] = await Promise.all([inv("search", { query: q, folder }), cvSearch(q, folder).catch(() => [])]);
   if (seq !== searchSeq) { otel.cancel(searchSp); return; }
   searchCount = hits.length + cvh.length;
   box.textContent = "";
@@ -2826,6 +2850,7 @@ function wsSide(which) {
   // showing. Obsidian's search leaf comes back still holding its query, so the
   // query travels in the leaf's state where Obsidian puts it.
   const lst = which === "left" && sidePane === "search" ? { query: $("sinput").value } : {};
+  if (lst.query !== undefined && searchFolder) lst.opensidianFolder = searchFolder;
   if (wsSideRaw[which]) return wsSideKeep(which, view, open, lst);
   const o = { id: wsIdOf(wsIds, which), type: "split", direction: "horizontal",
               children: [{ id: wsIdOf(wsIds, which + "tabs"), type: "tabs",
@@ -2867,6 +2892,7 @@ function wsSideKeep(which, view, open, lst) {
   if (hit && lst.query !== undefined) {
     const ls = hit.tn.children[hit.i].state;
     ls.state = Object.assign({}, ls.state && typeof ls.state === "object" ? ls.state : {}, lst);
+    if (!lst.opensidianFolder) delete ls.state.opensidianFolder;
   }
   if (open) delete o.collapsed; else o.collapsed = true;
   return o;
@@ -3184,8 +3210,10 @@ function wsSidesIn(doc) {
     if (p && p !== sidePane) setPane(p);
     // R28.11: the search leaf comes back holding its query, and the results
     // that query produced — the pane is restored, not merely selected.
-    if (ls.state && typeof ls.state.query === "string" && ls.state.query) {
-      $("sinput").value = ls.state.query;
+    if (p === "search" && ls.state) {
+      const folder = ls.state.opensidianFolder;
+      setSearchFolder(typeof folder === "string" && folder ? folder : null);
+      $("sinput").value = typeof ls.state.query === "string" ? ls.state.query : "";
       runSearch();                     // fire+forget: results fill in, boot is not blocked on them
     }
   }
@@ -8173,18 +8201,20 @@ async function cvOpenHere(p) {   // the link's own leaf (stock: a plain click na
 }
 /* goal cvf-links CVR-A-101: canvas text cards in global search. Plain terms only (all must occur in one card,
    case-insensitive); a query with operators / quotes is the note grammar's alone. [{canvas, snippet}] */
-async function cvSearch(q) {
+async function cvSearch(q, folder = null) {
   q = String(q || "").trim();
   if (!q || /[:"()\[\]]|(^|\s)-|\bOR\b/.test(q)) return [];
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
   const out = [];
-  for (const c of await cvLinkModel())
+  for (const c of await cvLinkModel()) {
+    if (folder && !c.canvas.startsWith(folder + "/")) continue;
     for (const t of c.texts) {
       const lc = t.toLowerCase();
       if (!terms.every(w => lc.includes(w))) continue;
       const line = t.split("\n").find(l => l.toLowerCase().includes(terms[0])) || t;
       out.push({ canvas: c.canvas, snippet: line.trim().slice(0, 200) });
     }
+  }
   return out;
 }
 /* goal cvf-links CVR-A-102: the global graph's feed + the canvases: one node per canvas (named with its
@@ -8462,7 +8492,7 @@ function canvasTok() {
 }
 /* goal cvf-create CVR-A-009 (coordinator ruling 03:00Z): the full folder menu in stock order. Off until the operator's
    go on phase canvasui step 4 (asserts the single-item menu); flipping it on is this one line. Rows without a backend
-   (such as folder copy or bases) are listed
+   (such as bases) are listed
    disabled with the reason, as the other explorer menus do. */
 const CV_FOLDERMENU_FULL = true;
 
@@ -8537,12 +8567,17 @@ async function applyFolderChange(from, to, views) {
     if (g.graphOn && g.graphRefresh) await g.graphRefresh();
   }
   if (rightOpen) rSchedule();
+  const nextSearchFolder = folderPathChange(from, to, true)(searchFolder);
+  if (nextSearchFolder !== searchFolder) {
+    setSearchFolder(nextSearchFolder);
+    if (sidePane === "search") await runSearch();
+  }
   wsTouch();
   updateTitle();
 }
 
 async function folderActionDialog(path, kind) {
-  const labels = { rename: "Rename folder", move: "Move folder", trash: "Move folder to trash" };
+  const labels = { rename: "Rename folder", move: "Move folder", trash: "Move folder to trash", copy: "Copy folder" };
   const { dialog, body, status } = toolDialog(labels[kind]);
   const form = toolNode("form");
   const fields = toolNode("fieldset");
@@ -8569,7 +8604,7 @@ async function folderActionDialog(path, kind) {
   action.type = "submit";
   const description = kind === "trash" ? `Move ${path} and all its contents to this vault's .trash folder?` : path;
   fields.append(toolNode("p", description));
-  if (kind !== "trash") fields.append(toolNode("p", "Links that use the old folder path may need updating."));
+  if (kind === "rename" || kind === "move") fields.append(toolNode("p", "Links that use the old folder path may need updating."));
   if (input) fields.append(input);
   fields.append(action);
   form.append(fields);
@@ -8589,7 +8624,7 @@ async function folderActionDialog(path, kind) {
     }
     if (to === path) { dialog.close(); return; }
     fields.disabled = close.disabled = true;
-    status("");
+    status(kind === "copy" ? "Copying folder…" : "");
     const views = [];
     let change;
     try {
@@ -8609,17 +8644,26 @@ async function folderActionDialog(path, kind) {
           views.push({ leaf, view, path: file });
         }
       }
-      change = await inv("vault_folder_action", { from: path, operation: to === null ? { kind: "trash" } : { kind: "move", to } });
+      if (kind === "copy") change = { path: await inv("copy_vault_folder", { from: path }), warnings: [] };
+      else change = await inv("vault_folder_action", { from: path, operation: to === null ? { kind: "trash" } : { kind: "move", to } });
     } catch (error) {
       status(errStr(error));
       fields.disabled = close.disabled = false;
       return;
     }
     try {
-      await applyFolderChange(path, to === null ? null : change.path, views);
-      if (change.warnings.length) say(change.warnings.join(". "));
-      else say(to === null ? `Moved to ${change.path}` : `Folder moved to ${change.path}`);
-    } catch (error) { say(`Folder moved to ${change.path}. Could not refresh the workspace: ${errStr(error)}`); }
+      if (kind === "copy") {
+        unfold.add(change.path);
+        lsTouch();
+        await refreshTree();
+        if (PLGVS) await PLGVS();
+        say(`Folder copied to ${change.path}`);
+      } else {
+        await applyFolderChange(path, to === null ? null : change.path, views);
+        if (change.warnings.length) say(change.warnings.join(". "));
+        else say(to === null ? `Moved to ${change.path}` : `Folder moved to ${change.path}`);
+      }
+    } catch (error) { say(`Folder at ${change.path}. Could not refresh the workspace: ${errStr(error)}`); }
     dialog.close();
   };
 }
@@ -8642,9 +8686,9 @@ function folderMenuFull(item, sep, f) {
   if (CANVAS && CANVAS.isRegistered()) item("New canvas", () => cmdNewCanvas(f));
   item("New base", null, "Missing subsystem: bases (.base files) are not implemented");
   sep();
-  item("Make a copy", null, "Missing subsystem: no folder copy command in the backend");
+  item("Make a copy", windowsFileActions ? () => folderActionDialog(dir, "copy") : null, windowsFileActions ? null : "Available on Windows");
   item("Move folder to...", windowsFileActions ? () => folderActionDialog(dir, "move") : null, windowsFileActions ? null : "Available on Windows");
-  item("Search in folder", null, "Missing subsystem: the search pane has no path: scope from a menu");
+  item("Search in folder", windowsFileActions ? () => searchInFolder(dir) : null, windowsFileActions ? null : "Available on Windows");
   sep();
   item("Bookmark", null, "Bookmarks hold note names (.obsidian/bookmarks.json, R9.4); a folder is not a note");
   fileActionItem(item, "Copy path", dir, "copy_path");
@@ -10111,6 +10155,9 @@ $("sinput").oninput = () => {              // debounce 60ms (was 150: sized for 
 };
 $("sclear").onclick = () => {
   $("sinput").value = ""; clearTimeout(searchT); runSearch(); $("sinput").focus();
+};
+$("sscope").onclick = () => {
+  setSearchFolder(null); clearTimeout(searchT); runSearch(); $("sinput").focus();
 };
 $("newbtn").onclick = cmdNewNote;
 $("fecabtn").onclick = () => feCollapseAll();   // collapseall R3/R4: explorer header, 5th slot

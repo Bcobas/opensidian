@@ -65,6 +65,9 @@ jobs:
       - name: Test Windows folder actions
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian folder_actions::tests
+      - name: Test folder-scoped search
+        working-directory: src-tauri
+        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian search_folder_scope_applies_before_the_result_limit
       - name: Test OCR on a scanned PDF
         working-directory: src-tauri
         shell: pwsh

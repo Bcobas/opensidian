@@ -34,6 +34,13 @@ fn check_directory(vault: &vaultfs::Vault, rel: &Path) -> io::Result<()> {
     })?
 }
 
+pub fn copy(root: &Path, from: &str) -> Result<PathBuf, String> {
+    let from = safe_rel(from).ok_or("Invalid source folder")?;
+    let vault = vaultfs::Vault::open(root).map_err(|e| e.to_string())?;
+    check_directory(&vault, &from).and_then(|()| vault.duplicate_dir(&from))
+        .map_err(|error| format!("Could not copy the folder: {error}"))
+}
+
 fn trash(vault: &vaultfs::Vault, from: &Path) -> io::Result<PathBuf> {
     let trash = Path::new(TRASH_DIR);
     vault.mkdir_p(trash)?;
@@ -113,6 +120,31 @@ mod tests {
 
     impl Drop for Fixture {
         fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn copies_the_full_tree_and_indexes_the_new_notes_without_replacing_siblings() {
+        let root = Fixture::new();
+        fs::create_dir(root.0.join("Café 1")).unwrap();
+        fs::write(root.0.join("Café 1/Keep.txt"), b"existing folder").unwrap();
+        fs::write(root.0.join("Café 2"), b"existing file").unwrap();
+        fs::create_dir(root.0.join("Café/empty")).unwrap();
+        fs::write(root.0.join("Café/.metadata"), b"hidden data").unwrap();
+        let mut index = Index::build(&root.0);
+
+        // Index the copied disk bytes, even if the original has changed since the last watcher tick.
+        fs::write(root.0.join("Café/sub/Plan.md"), "# Latest plan").unwrap();
+        let copied = copy(&root.0, "Café").unwrap();
+        assert_eq!(copied, Path::new("Café 3"));
+        assert_eq!(fs::read(root.0.join("Café 1/Keep.txt")).unwrap(), b"existing folder");
+        assert_eq!(fs::read(root.0.join("Café 2")).unwrap(), b"existing file");
+        assert_eq!(fs::read(root.0.join(&copied).join("sub/Photo.png")).unwrap(), b"photo");
+        assert_eq!(fs::read(root.0.join(&copied).join(".metadata")).unwrap(), b"hidden data");
+        assert!(root.0.join(&copied).join("empty").is_dir());
+        index.index_copied_folder(&root.0, &copied).unwrap();
+        assert_eq!(index.content("Café 3/sub/Plan"), Some("# Latest plan"));
+        assert_eq!(index.images(), ["Café 3/sub/Photo.png", "Café/sub/Photo.png"]);
+        assert!(root.0.join("Café/sub/Plan.md").is_file());
     }
 
     #[test]

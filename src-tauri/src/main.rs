@@ -1104,6 +1104,21 @@ async fn vault_folder_action(app: tauri::AppHandle, from: String, operation: fol
     }).await.map_err(|error| error.to_string())?
 }
 
+#[cfg(windows)]
+#[tauri::command]
+async fn copy_vault_folder(app: tauri::AppHandle, from: String) -> Result<String, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        let vault = app.state::<Vault>();
+        let root = cur_vault(&vault).ok_or("No vault open")?;
+        let path = folder_actions::copy(&root, &from)?;
+        if let Err(error) = vault.index.lock().unwrap_or_else(|error| error.into_inner()).index_copied_folder(&root, &path) {
+            eprintln!("[vault] could not index the folder copy: {error}");
+        }
+        Ok(opensidian_lib::vault_path_string(&path))
+    }).await.map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 fn list_notes(v: State<Vault>, otel: Option<perf::Ctx>) -> Vec<String> {
     span_timed!(otel => "list_notes", cur_notes(&v))
@@ -4846,13 +4861,32 @@ fn search_docs<'a>(docs: impl IntoIterator<Item = (&'a str, &'a str, &'a [String
 }
 
 #[tauri::command]
-fn search(v: State<Vault>, query: String, otel: Option<perf::Ctx>) -> Vec<SearchHit> {
-    span_timed!(otel => "search", search_inner(&v, &query))
+fn search(v: State<Vault>, query: String, folder: Option<String>, otel: Option<perf::Ctx>) -> Vec<SearchHit> {
+    span_timed!(otel => "search", search_index(&v.index.lock().unwrap(), &query, folder.as_deref()))
 }
 
-fn search_inner(v: &State<Vault>, query: &str) -> Vec<SearchHit> {
-    // perf-index: contents are resident; no per-call vault read
-    search_docs(v.index.lock().unwrap().docs(), query)
+fn search_index(index: &Index, query: &str, folder: Option<&str>) -> Vec<SearchHit> {
+    let Some(folder) = folder else { return search_docs(index.docs(), query) };
+    let Some(folder) = safe_rel(folder) else { return Vec::new() };
+    let prefix = format!("{}/", opensidian_lib::vault_path_string(&folder));
+    search_docs(index.docs().filter(|(name, _, _)| name.starts_with(&prefix)), query)
+}
+
+#[cfg(test)]
+#[test]
+fn search_folder_scope_applies_before_the_result_limit() {
+    let mut index = Index::default();
+    index.upsert("A/Unrelated", &"Needle\n".repeat(510));
+    index.upsert("Proyecto", "Needle");
+    index.upsert("Proyecto otro/Other", "Needle");
+    index.upsert("Proyecto/Sub carpeta/Inside", "Needle #work");
+
+    assert_eq!(search_index(&index, "Needle", None).len(), 500);
+    let hits = search_index(&index, "tag:work Needle", Some("Proyecto"));
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].note, "Proyecto/Sub carpeta/Inside");
+    assert_eq!(search_index(&index, "Needle", Some("Proyecto")).len(), 1);
+    assert!(search_index(&index, "Needle", Some("../Proyecto")).is_empty());
 }
 
 /* R9.4 bookmarks live in vault/.obsidian/bookmarks.json — Obsidian's OWN
@@ -6992,6 +7026,7 @@ fn main() {
             #[cfg(windows)] save_updated_package,
             #[cfg(windows)] vault_file_action,
             #[cfg(windows)] vault_folder_action,
+            #[cfg(windows)] copy_vault_folder,
             capture_web,
             create_vault, create_vault_dir, open_vault_window, switch_show, switch_ready, boot_notice, home_dir, list_dirs, list_folders, create_dir, backlinks, search,
             list_bookmarks, toggle_bookmark, bookmark_rows, bm_group_new, bm_group_rename, bm_group_delete, bm_move, bm_add, bm_drag, bm_add_at, recent_vaults, rename_note, media_rename, media_read, move_note, update_links, delete_note, link_consent, set_link_consent, strict_line_breaks, set_strict_line_breaks, qs_new_name, readable_line_length, graph_settings, set_graph_settings, tags, tag_counts,
