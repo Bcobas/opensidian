@@ -74,6 +74,8 @@ mod winsize;
 mod windows;
 #[cfg(windows)]
 mod file_actions;
+#[cfg(windows)]
+mod folder_actions;
 
 #[cfg(windows)]
 mod sandbox {
@@ -1088,6 +1090,18 @@ fn create_dir(v: State<Vault>, name: String) -> Result<(), String> {
         // at every step, so it never crosses a symlinked dir
         vaultfs::mkdir_p(&root, &rel).map_err(|_| "outside vault".to_string())
     })
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn vault_folder_action(app: tauri::AppHandle, from: String, operation: folder_actions::Operation) -> Result<folder_actions::Change, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        let vault = app.state::<Vault>();
+        let root = cur_vault(&vault).ok_or("No vault open")?;
+        let mut index = vault.index.lock().map_err(|error| error.to_string())?;
+        folder_actions::run(&root, &mut index, &from, operation)
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -5573,6 +5587,30 @@ fn rename_bookmark_in(root: &Path, old: &str, new: &str) {
     let _ = write_bm_tree(root, &tree);
 }
 
+#[cfg(windows)]
+fn move_folder_bookmarks(root: &Path, from: &str, to: &str) -> Result<(), String> {
+    fn remap(nodes: &mut [BmNode], from: &str, to: &str) -> bool {
+        let mut changed = false;
+        for node in nodes {
+            match node {
+                BmNode::File { name, .. } | BmNode::Pdf { path: name, .. } => {
+                    if let Some(suffix) = name.strip_prefix(from) {
+                        *name = format!("{to}{suffix}");
+                        changed = true;
+                    }
+                }
+                BmNode::Group { items, .. } => changed |= remap(items, from, to),
+                BmNode::Opaque(_) => {}
+            }
+        }
+        changed
+    }
+    if !root.join(BM_FILE).is_file() { return Ok(()); }
+    let mut tree = read_bm_tree(root);
+    if remap(&mut tree, from, to) { write_bm_tree(root, &tree)?; }
+    Ok(())
+}
+
 /* R4X.4 (criterion 5) — IN PLACE, wherever the entry SITS: the payload of the
    matching `f` node is replaced and the node does not move, so a bookmark
    inside a group keeps its GROUP and its index within that group. Rebuilding a
@@ -6953,6 +6991,7 @@ fn main() {
             #[cfg(windows)] preview_updated_package,
             #[cfg(windows)] save_updated_package,
             #[cfg(windows)] vault_file_action,
+            #[cfg(windows)] vault_folder_action,
             capture_web,
             create_vault, create_vault_dir, open_vault_window, switch_show, switch_ready, boot_notice, home_dir, list_dirs, list_folders, create_dir, backlinks, search,
             list_bookmarks, toggle_bookmark, bookmark_rows, bm_group_new, bm_group_rename, bm_group_delete, bm_move, bm_add, bm_drag, bm_add_at, recent_vaults, rename_note, media_rename, media_read, move_note, update_links, delete_note, link_consent, set_link_consent, strict_line_breaks, set_strict_line_breaks, qs_new_name, readable_line_length, graph_settings, set_graph_settings, tags, tag_counts,

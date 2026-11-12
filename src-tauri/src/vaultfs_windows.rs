@@ -520,8 +520,16 @@ impl Vault {
     }
 
     pub fn p_rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.rename_entry(from, to, 0)
+    }
+
+    pub fn move_dir(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.rename_entry(from, to, DIRECTORY)
+    }
+
+    fn rename_entry(&self, from: &Path, to: &Path, options: u32) -> io::Result<()> {
         let (source, name) = self.parent(from, false)?;
-        let file = open_at(source.handle(), name, DELETE, SHARE_READ, OPEN, 0)?;
+        let file = open_at(source.handle(), name, DELETE, SHARE_READ, OPEN, options)?;
         let (destination, name) = self.parent(to, false)?;
         rename(&file, Some(destination.handle()), name, false)
     }

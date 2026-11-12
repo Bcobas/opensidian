@@ -8462,9 +8462,168 @@ function canvasTok() {
 }
 /* goal cvf-create CVR-A-009 (coordinator ruling 03:00Z): the full folder menu in stock order. Off until the operator's
    go on phase canvasui step 4 (asserts the single-item menu); flipping it on is this one line. Rows without a backend
-   (no folder rename/delete/copy/move command or bases) are listed
+   (such as folder copy or bases) are listed
    disabled with the reason, as the other explorer menus do. */
 const CV_FOLDERMENU_FULL = true;
+
+function folderPathChange(from, to, includeFolder = false) {
+  return path => {
+    if (typeof path !== "string" || (!path.startsWith(from + "/") && !(includeFolder && path === from))) return path;
+    return to === null ? null : to + path.slice(from.length);
+  };
+}
+
+async function applyFolderChange(from, to, views) {
+  const remap = folderPathChange(from, to);
+  const moving = to !== null;
+  if (moving && PLGNM) {
+    for (const name of notesCache) {
+      const next = remap(name);
+      if (next !== name) {
+        try { PLGNM(name, next); } catch (error) { console.error("[plugin] noteMoved:", error); }
+      }
+    }
+  }
+  for (const g of groups()) {
+    for (let i = g.tabs.length - 1; i >= 0; i--) {
+      const tab = g.tabs[i];
+      const key = tab.kind === "lg" ? "center" : "name";
+      if (!tab.kind || tab.kind === "lg") {
+        const next = remap(tab[key]);
+        if (next === null) {
+          if (i === g.active) { clearTimeout(g.saveT); g.saveT = null; }
+          await closeTab(g, i, "user-close", "folder-trash", true);
+          continue;
+        }
+        if (next !== tab[key]) {
+          tab[key] = next;
+          if (tab.view && !tab.kind) { tab.view.note = next; setInlineTitle(tab.view, next); }
+        }
+      }
+      if (tab.hist) {
+        let removedBefore = 0;
+        tab.hist = tab.hist.filter((entry, pos) => {
+          const next = entry.gg ? entry.n : remap(entry.n);
+          if (next !== null) { entry.n = next; return true; }
+          if (pos <= tab.hpos) removedBefore++;
+          return false;
+        });
+        tab.hpos -= removedBefore;
+      }
+    }
+  }
+  mruList = mruList.map(remap).filter(name => name !== null);
+  closedTabs = closedTabs.flatMap(entry => {
+    const name = remap(typeof entry === "string" ? entry : entry.name);
+    return name === null ? [] : [typeof entry === "string" ? name : { ...entry, name }];
+  });
+  unfold = new Set([...unfold].map(folderPathChange(from, to, true)).filter(path => path !== null));
+  if (moving) {
+    const parts = to.split("/");
+    for (let depth = 1; depth < parts.length; depth++) unfold.add(parts.slice(0, depth).join("/"));
+  }
+  lsTouch();
+
+  await refreshTree();
+  if (PLGVS) await PLGVS();
+  for (const { leaf, view, path } of views) {
+    const next = remap(path);
+    if (next === null) await leaf.detach();
+    else await leaf.setViewState({ ...view, state: { ...view.state, file: next } });
+  }
+  await refreshBm();
+  for (const g of groups()) {
+    renderTabs(g);
+    if (g.graphOn && g.graphRefresh) await g.graphRefresh();
+  }
+  if (rightOpen) rSchedule();
+  wsTouch();
+  updateTitle();
+}
+
+async function folderActionDialog(path, kind) {
+  const labels = { rename: "Rename folder", move: "Move folder", trash: "Move folder to trash" };
+  const { dialog, body, status } = toolDialog(labels[kind]);
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const name = path.split("/").pop();
+  const parent = path.slice(0, Math.max(0, path.lastIndexOf("/")));
+  const close = dialog.querySelector("header button");
+  const affects = folderPathChange(path, null);
+  let input;
+  if (kind === "rename") {
+    input = toolNode("input");
+    input.setAttribute("aria-label", "New folder name");
+    input.value = name;
+  } else if (kind === "move") {
+    try {
+      const folders = await inv("list_folders");
+      if (!dialog.open) return;
+      const insideFolder = folderPathChange(path, null, true);
+      const options = ["", ...folders].filter(folder => folder !== parent && insideFolder(folder) !== null);
+      input = toolSelect("Destination folder", options.map(folder => [folder, folder || "Vault root"]));
+      if (!options.length) { status("No other destination folder is available."); return; }
+    } catch (error) { status(errStr(error)); return; }
+  }
+  const action = toolNode("button", labels[kind]);
+  action.type = "submit";
+  const description = kind === "trash" ? `Move ${path} and all its contents to this vault's .trash folder?` : path;
+  fields.append(toolNode("p", description));
+  if (kind !== "trash") fields.append(toolNode("p", "Links that use the old folder path may need updating."));
+  if (input) fields.append(input);
+  fields.append(action);
+  form.append(fields);
+  body.append(form);
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  if (input) { input.focus(); if (kind === "rename") input.select(); }
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    let to = null;
+    if (kind === "rename") {
+      const next = input.value.trim();
+      if (!next || /[\\/]/.test(next)) { status("Enter a single folder name."); return; }
+      to = parent ? `${parent}/${next}` : next;
+    } else if (kind === "move") {
+      to = input.value ? `${input.value}/${name}` : name;
+    }
+    if (to === path) { dialog.close(); return; }
+    fields.disabled = close.disabled = true;
+    status("");
+    const views = [];
+    let change;
+    try {
+      await Promise.all(savesInFlight);
+      for (const g of groups()) {
+        const tab = g.tabs[g.active];
+        if (!tab || tab.kind || affects(tab.name) !== null) continue;
+        await flushSave(g);
+        if (bufDirty(g)) throw new Error("Save the current edits before continuing.");
+      }
+      if (PLG) for (const type of ["canvas", "pdf"]) {
+        for (const leaf of PLG.app.workspace.getLeavesOfType(type)) {
+          const view = leaf.getViewState();
+          const file = view.state.file;
+          if (affects(file) !== null) continue;
+          if (leaf.view.flush) await leaf.view.flush(true);
+          views.push({ leaf, view, path: file });
+        }
+      }
+      change = await inv("vault_folder_action", { from: path, operation: to === null ? { kind: "trash" } : { kind: "move", to } });
+    } catch (error) {
+      status(errStr(error));
+      fields.disabled = close.disabled = false;
+      return;
+    }
+    try {
+      await applyFolderChange(path, to === null ? null : change.path, views);
+      if (change.warnings.length) say(change.warnings.join(". "));
+      else say(to === null ? `Moved to ${change.path}` : `Folder moved to ${change.path}`);
+    } catch (error) { say(`Folder moved to ${change.path}. Could not refresh the workspace: ${errStr(error)}`); }
+    dialog.close();
+  };
+}
+
 function folderMenuFull(item, sep, f) {
   const dir = String(f || "").replace(/^\/+|\/+$/g, "");
   item("New note", async () => {
@@ -8484,7 +8643,7 @@ function folderMenuFull(item, sep, f) {
   item("New base", null, "Missing subsystem: bases (.base files) are not implemented");
   sep();
   item("Make a copy", null, "Missing subsystem: no folder copy command in the backend");
-  item("Move folder to...", null, "Missing subsystem: no folder move command in the backend");
+  item("Move folder to...", windowsFileActions ? () => folderActionDialog(dir, "move") : null, windowsFileActions ? null : "Available on Windows");
   item("Search in folder", null, "Missing subsystem: the search pane has no path: scope from a menu");
   sep();
   item("Bookmark", null, "Bookmarks hold note names (.obsidian/bookmarks.json, R9.4); a folder is not a note");
@@ -8492,8 +8651,8 @@ function folderMenuFull(item, sep, f) {
   sep();
   fileActionItem(item, "Show in system explorer", dir, "reveal");
   sep();
-  item("Rename...", null, "Missing subsystem: no folder rename command in the backend");
-  item("Delete", null, "Missing subsystem: no folder delete command in the backend");
+  item("Rename...", windowsFileActions ? () => folderActionDialog(dir, "rename") : null, windowsFileActions ? null : "Available on Windows");
+  item("Delete", windowsFileActions ? () => folderActionDialog(dir, "trash") : null, windowsFileActions ? null : "Available on Windows");
 }
 function folderMenu(e, f) {                 // right-click an explorer folder row
   if (!windowsFileActions && (!CANVAS || !CANVAS.isRegistered())) return;

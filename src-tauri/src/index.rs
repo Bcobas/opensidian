@@ -795,6 +795,30 @@ impl Index {
         self.rebuild_backlinks();
     }
 
+    /// Apply a folder move or trash to indexed notes and attachments in one pass.
+    #[cfg(windows)]
+    pub fn relocate_folder(&mut self, from: &str, to: Option<&str>) {
+        let prefix = format!("{from}/");
+        let children: Vec<_> = self.names.iter().filter(|name| name.starts_with(&prefix)).cloned().collect();
+        for name in children {
+            if let Some(meta) = self.notes.remove(&name) {
+                if let Some(to) = to {
+                    self.notes.insert(format!("{to}/{}", &name[prefix.len()..]), meta);
+                }
+            }
+        }
+        self.images.retain_mut(|path| {
+            let Some(suffix) = path.strip_prefix(&prefix) else { return true };
+            let Some(to) = to else { return false };
+            *path = format!("{to}/{suffix}");
+            true
+        });
+        self.images.sort_unstable();
+        self.images.dedup();
+        self.refresh_names();
+        self.rebuild_backlinks();
+    }
+
     /// after the key moved: rewrite [[old]] -> [[new]] everywhere. Returns
     /// (name, new content) for every note whose text changed.
     pub fn rewrite_to(&mut self, old: &str, new: &str) -> Vec<(String, String)> {
