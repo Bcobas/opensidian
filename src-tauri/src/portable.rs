@@ -349,10 +349,73 @@ impl Drop for Session {
 
 impl Session {
     pub fn cleanup(&self) {
-        if self.directory.canonicalize().as_ref().is_ok_and(|path| path == &self.directory) {
-            let _ = std::fs::remove_dir_all(&self.directory);
+        remove_temporary_directory(&self.directory);
+    }
+
+    #[cfg(windows)]
+    pub fn save_as_vault(&self, parent: &Path, name: &str) -> Result<PathBuf, String> {
+        let relative = safe_rel(name).filter(|path| path.file_name() == Some(std::ffi::OsStr::new(name)))
+            .ok_or("Enter a valid name for the new vault")?;
+        let parent = parent.canonicalize().map_err(fail)?;
+        if parent.starts_with(&self.directory) {
+            return Err("Choose a location outside the temporary package".to_owned());
+        }
+        let destination = Vault::open(&parent).map_err(fail)?;
+        match destination.p_stat(&relative) {
+            Ok(_) => return Err("A file or folder with that name already exists".to_owned()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(fail(error)),
+        }
+
+        let source = Vault::open(&self.directory).map_err(fail)?;
+        let stage = PathBuf::from(format!(".opensidian-save-{}", opensidian_lib::os_random_hex().map_err(fail)?));
+        destination.p_mkdir(&stage, false).map_err(fail)?;
+        let temporary = parent.join(&stage);
+        let result = copy_vault_files(&source, &destination, &stage).and_then(|()| {
+            destination.p_rename(&stage, &relative).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    "A file or folder with that name already exists".to_owned()
+                } else { fail(error) }
+            })
+        });
+        if let Err(error) = result {
+            remove_temporary_directory(&temporary);
+            return Err(error);
+        }
+        Ok(parent.join(relative))
+    }
+}
+
+fn remove_temporary_directory(path: &Path) {
+    if path.canonicalize().as_ref().is_ok_and(|resolved| resolved == path) {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+#[cfg(windows)]
+fn copy_vault_files(source: &Vault, destination: &Vault, stage: &Path) -> Result<(), String> {
+    let mut pending = vec![PathBuf::new()];
+    while let Some(folder) = pending.pop() {
+        for (name, kind) in source.p_list(&folder).map_err(fail)? {
+            if name.starts_with('.') { continue; }
+            let path = folder.join(name);
+            let target = stage.join(&path);
+            match kind {
+                "folder" => {
+                    destination.p_mkdir(&target, false).map_err(fail)?;
+                    pending.push(path);
+                }
+                "file" => {
+                    let mut input = source.open_read(&path).map_err(fail)?;
+                    let mut output = destination.create_new(&target, false).map_err(fail)?;
+                    std::io::copy(&mut input, &mut output).map_err(fail)?;
+                    output.sync_all().map_err(fail)?;
+                }
+                _ => {},
+            }
         }
     }
+    Ok(())
 }
 
 pub fn is_package(path: &Path) -> bool {
@@ -465,5 +528,56 @@ mod tests {
         zip.write_all(b"no").unwrap();
         drop(zip.finish().unwrap());
         assert!(unpack(&path).err().unwrap().contains("Unexpected path"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn saves_the_edited_package_as_an_independent_vault() {
+        let original = fixture();
+        let archive = original.directory.join("Notes.opensidian.zip");
+        let mut zip = ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        let options = SimpleFileOptions::default();
+        zip.start_file(MANIFEST, options).unwrap();
+        zip.write_all(br#"{"version":1,"entry":"Start.md"}"#).unwrap();
+        zip.start_file("Start.md", options).unwrap();
+        zip.write_all(b"# Original\n").unwrap();
+        drop(zip.finish().unwrap());
+        let original_bytes = std::fs::read(&archive).unwrap();
+        let session = unpack(&archive).unwrap();
+        let source = Vault::open(&session.directory).unwrap();
+        source.write_atomic(Path::new("Start.md"), b"# Edited\n\n[More](Notes/More.md)\n", false).unwrap();
+        source.write_atomic(Path::new("Notes/More.md"), b"![Photo](../attachments/photo.png)", false).unwrap();
+        source.write_atomic(Path::new("attachments/photo.png"), b"fixture image", false).unwrap();
+        source.write_atomic(Path::new(".obsidian/workspace.json"), b"temporary config", false).unwrap();
+        source.mkdir_p(Path::new("Empty")).unwrap();
+
+        assert!(session.save_as_vault(&session.directory, "Inside").is_err());
+        assert!(session.save_as_vault(&original.directory, "../Outside").is_err());
+        let saved = session.save_as_vault(&original.directory, "Notas de café").unwrap();
+        assert_eq!(saved, original.directory.join("Notas de café"));
+        assert!(session.save_as_vault(&original.directory, "Notas de café").unwrap_err().contains("already exists"));
+        drop(source);
+        drop(session);
+        assert_eq!(std::fs::read(saved.join("Start.md")).unwrap(), b"# Edited\n\n[More](Notes/More.md)\n");
+        assert_eq!(std::fs::read(saved.join("Notes/More.md")).unwrap(), b"![Photo](../attachments/photo.png)");
+        assert_eq!(std::fs::read(saved.join("attachments/photo.png")).unwrap(), b"fixture image");
+        assert!(saved.join("Empty").is_dir());
+        assert!(!saved.join(".obsidian").exists());
+        assert_eq!(std::fs::read(archive).unwrap(), original_bytes);
+        assert_eq!(crate::Index::build(&saved).backlinks("Notes/More"), ["Start"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unreadable_source_leaves_no_partial_vault() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let source = fixture();
+        let destination = fixture();
+        let path = source.directory.join("Locked.md");
+        std::fs::write(&path, "locked").unwrap();
+        let _locked = std::fs::OpenOptions::new().read(true).share_mode(0).open(path).unwrap();
+        assert!(source.save_as_vault(&destination.directory, "New vault").is_err());
+        assert_eq!(std::fs::read_dir(&destination.directory).unwrap().count(), 0);
     }
 }

@@ -9556,6 +9556,7 @@ const CMDS = [
   ["opensidian:note-table", "Open note table", [], toolNoteTable, () => !!vaultPath],
   ["opensidian:package-export", "Export note with its files", [], () => toolPortableExport(toolActiveNote()), () => !!toolActiveNote()],
   ["opensidian:package-open", "Open portable package", [], toolOpenPackage],
+  ["opensidian:package-save-vault", "Save package as vault", [], toolSavePackageAsVault, () => !!packageInfo?.[2]],
   ["opensidian:web-capture", "Capture web content", [], toolWebCapture, () => !!vaultPath],
   ["app:open-settings",        "Open settings",                       ["ctrl+,"],               () => cmdSettings()],
   // R14: the theme switch is a registry entry like any other — no bespoke
@@ -11775,7 +11776,7 @@ async function enterVault() {
   if (packageInfo) {
     $("vswitch").textContent = packageInfo[1];
     $("vswitch").title = "Temporary vault. Changes here are separate from the ZIP.";
-    say("Temporary package. Changes here are separate from the ZIP.");
+    say(packageInfo[2] ? "Temporary package. Use Save package as vault to keep changes." : "Temporary package. Changes here are separate from the ZIP.");
   }
   perf.mark("boot", 0, { notes: names.length });   // perf: page start -> vault ready (first note rendered)
   Ed.fontWarm(fg());   // perfslow: the live preview's faces are built in idle time after boot, not inside the first note open that shows them

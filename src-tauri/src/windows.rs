@@ -11,7 +11,7 @@ use ::windows::Win32::{
     Foundation::{ERROR_CANCELLED, HWND},
     System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED},
     UI::Shell::{Common::COMDLG_FILTERSPEC, FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
-        FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST, SIGDN_FILESYSPATH},
+        FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, SIGDN_FILESYSPATH},
 };
 
 #[link(name = "kernel32")]
@@ -53,8 +53,13 @@ pub fn open_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Show a modal file picker on the window's UI thread.
-pub fn pick_package(owner: HWND) -> ::windows::core::Result<Option<PathBuf>> {
+pub enum PackagePicker {
+    Archive,
+    VaultParent,
+}
+
+/// Show a modal picker on the window's UI thread.
+pub fn pick_package_path(owner: HWND, picker: PackagePicker) -> ::windows::core::Result<Option<PathBuf>> {
     struct Apartment;
     impl Drop for Apartment {
         fn drop(&mut self) {
@@ -69,12 +74,23 @@ pub fn pick_package(owner: HWND) -> ::windows::core::Result<Option<PathBuf>> {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         let _apartment = Apartment;
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
-        dialog.SetTitle(w!("Open portable package"))?;
-        dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
-            pszName: w!("Opensidian packages (*.opensidian.zip)"),
-            pszSpec: w!("*.opensidian.zip"),
-        }])?;
-        dialog.SetOptions(dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST)?;
+        let mut options = dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_PATHMUSTEXIST;
+        match picker {
+            PackagePicker::Archive => {
+                dialog.SetTitle(w!("Open portable package"))?;
+                dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+                    pszName: w!("Opensidian packages (*.opensidian.zip)"),
+                    pszSpec: w!("*.opensidian.zip"),
+                }])?;
+                options |= FOS_FILEMUSTEXIST;
+            }
+            PackagePicker::VaultParent => {
+                dialog.SetTitle(w!("Choose where to save the vault"))?;
+                dialog.SetOkButtonLabel(w!("Save here"))?;
+                options = (options & !FOS_FILEMUSTEXIST) | FOS_PICKFOLDERS;
+            }
+        }
+        dialog.SetOptions(options)?;
         match dialog.Show(Some(owner)) {
             Err(error) if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => return Ok(None),
             other => other?,

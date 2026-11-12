@@ -243,6 +243,40 @@ async function toolPackageLink(path, anchor) {
   return true;
 }
 
+function toolSavePackageAsVault() {
+  if (!packageInfo?.[2]) return;
+  const { dialog, body, status } = toolDialog("Save package as vault");
+  const form = toolNode("form");
+  const label = toolNode("label", "Name of the new vault");
+  const name = toolNode("input");
+  name.required = true;
+  name.value = packageInfo[1].replace(/\.opensidian\.zip$/i, "") || "Imported package";
+  label.append(name);
+  const save = toolNode("button", "Choose folder and save");
+  form.append(label, save);
+  body.append(form);
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (save.disabled) return;
+    save.disabled = name.disabled = true;
+    status("Saving the current notes…");
+    try {
+      await toolFlush();
+      status("Choose a folder for the new vault…");
+      const path = await inv("save_package_as_vault", { name: name.value });
+      if (!path) { status(""); return; }
+      status("Saved to " + path);
+      const open = toolButton("Open saved vault", async () => {
+        try { await inv("open_vault_window", { path, replace: false }); dialog.close(); }
+        catch (error) { status(errStr(error)); }
+      });
+      body.replaceChildren(open);
+      open.focus();
+    } catch (error) { status(errStr(error)); }
+    finally { save.disabled = name.disabled = false; }
+  };
+}
+
 function toolWebCapture() {
   const { dialog, body, status } = toolDialog("Capture web content");
   const form = toolNode("form");

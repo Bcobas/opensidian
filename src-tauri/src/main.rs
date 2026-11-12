@@ -1206,10 +1206,10 @@ async fn export_package(v: State<'_, Vault>, name: String, selected: Vec<String>
 struct PackageState(Option<portable::Session>);
 
 #[tauri::command]
-fn package_session(session: State<PackageState>) -> Option<(String, String)> {
+fn package_session(session: State<PackageState>) -> Option<(String, String, bool)> {
     session.0.as_ref().map(|session| {
         eprintln!("[package] opened temporary vault");
-        (session.entry.clone(), session.title.clone())
+        (session.entry.clone(), session.title.clone(), cfg!(windows))
     })
 }
 
@@ -1222,15 +1222,7 @@ fn open_package(path: String) -> Result<(), String> {
 async fn pick_package(window: tauri::Window) -> Result<bool, String> {
     #[cfg(windows)]
     {
-        let (send, mut receive) = tauri::async_runtime::channel(1);
-        let owner = window.clone();
-        window.run_on_main_thread(move || {
-            let result = owner.hwnd().map_err(|error| error.to_string()).and_then(|hwnd| {
-                windows::pick_package(hwnd).map_err(|error| error.to_string())
-            });
-            let _ = send.try_send(result);
-        }).map_err(|error| error.to_string())?;
-        if let Some(path) = receive.recv().await.ok_or("The package picker closed unexpectedly")?? {
+        if let Some(path) = choose_package_path(window, windows::PackagePicker::Archive).await? {
             portable::launch(&path)?;
         }
         Ok(true)
@@ -1239,6 +1231,44 @@ async fn pick_package(window: tauri::Window) -> Result<bool, String> {
     {
         let _ = window;
         Ok(false)
+    }
+}
+
+#[cfg(windows)]
+async fn choose_package_path(window: tauri::Window, picker: windows::PackagePicker) -> Result<Option<PathBuf>, String> {
+    let (send, mut receive) = tauri::async_runtime::channel(1);
+    let owner = window.clone();
+    window.run_on_main_thread(move || {
+        let result = owner.hwnd().map_err(|error| error.to_string()).and_then(|hwnd| {
+            windows::pick_package_path(hwnd, picker).map_err(|error| error.to_string())
+        });
+        let _ = send.try_send(result);
+    }).map_err(|error| error.to_string())?;
+    receive.recv().await.ok_or("The package picker closed unexpectedly".to_owned())?
+}
+
+#[tauri::command]
+async fn save_package_as_vault(app: tauri::AppHandle, window: tauri::Window, name: String) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        if app.state::<PackageState>().0.is_none() { return Err("Open a portable package first".to_owned()); }
+        let name = name.trim().to_owned();
+        let Some(parent) = choose_package_path(window, windows::PackagePicker::VaultParent).await? else { return Ok(None) };
+        if !picker_allows(&parent.join(&name)) { return Err("Choose a valid vault location and name".to_owned()); }
+        tauri::async_runtime::spawn_blocking(move || {
+            let package = app.state::<PackageState>();
+            let session = package.0.as_ref().ok_or("Open a portable package first")?;
+            let vault = app.state::<Vault>();
+            let _guard = vault.index.lock().map_err(|error| error.to_string())?;
+            let path = session.save_as_vault(&parent, &name)?;
+            Ok(Some(path.display().to_string()))
+        }).await.map_err(|error| error.to_string())?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, window, name);
+        Err("Saving the package as a vault is available on Windows".to_owned())
     }
 }
 
@@ -6871,7 +6901,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_notes, list_images, canvas_io, canvas_attach, paste_image, read_note, write_note, create_note, render, render_blocks, block_lines, render_view, highlight_blocks, graph, graph_local, graph_view, vault_get, pick_vault,
             note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
-            preview_package, export_package, package_session, open_package, pick_package, open_package_pdf,
+            preview_package, export_package, package_session, open_package, pick_package, save_package_as_vault, open_package_pdf,
             capture_web,
             create_vault, create_vault_dir, open_vault_window, switch_show, switch_ready, boot_notice, home_dir, list_dirs, list_folders, create_dir, backlinks, search,
             list_bookmarks, toggle_bookmark, bookmark_rows, bm_group_new, bm_group_rename, bm_group_delete, bm_move, bm_add, bm_drag, bm_add_at, recent_vaults, rename_note, media_rename, media_read, move_note, update_links, delete_note, link_consent, set_link_consent, strict_line_breaks, set_strict_line_breaks, qs_new_name, readable_line_length, graph_settings, set_graph_settings, tags, tag_counts,
