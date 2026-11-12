@@ -158,7 +158,7 @@ async function toolTasks() {
             Ed.revealAt(group, line, 0);
             Ed.flashLine(group, line);
           } else {
-            const checkbox = group.preview?.querySelector(`input[data-line="${task.line}"]`);
+            const checkbox = group.preview?.querySelector(`input[data-line="${line}"]`);
             checkbox?.scrollIntoView({ block: "center" });
             flash(checkbox?.closest("li"));
           }
@@ -304,10 +304,10 @@ function toolOpenPackage() {
   };
 }
 
-async function toolPackageLink(path) {
+async function toolPackageLink(path, anchor) {
   if (!packageInfo || !path.startsWith("attachments/")) return false;
   if (/\.pdf$/i.test(path)) {
-    try { await inv("open_package_pdf", { path }); }
+    try { await inv("open_package_pdf", { path, anchor }); }
     catch (error) { say(errStr(error)); }
   } else {
     say("Extract the package to open " + path);

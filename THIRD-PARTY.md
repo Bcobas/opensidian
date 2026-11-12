@@ -15,6 +15,12 @@ version is 3 and not 2 because `tao`, the crate that opens the app's window, is
 Apache-2.0-only, which GPLv2 cannot link.
 ---
 
+## Vault tool dependencies
+
+- `zip` 8.6.0, the zip-rs contributors, MIT. [Source and licence](https://github.com/zip-rs/zip2)
+- `yaml-rust2` 0.10.4, the yaml-rust2 contributors, MIT or Apache-2.0. [Source and licences](https://github.com/Ethiraric/yaml-rust2)
+- `dom_query` 0.27.0, the dom_query contributors, MIT. [Source and licence](https://github.com/niklak/dom_query)
+
 ## Catppuccin (Mocha palette)
 
 **Used in:** `ui/style.css` — the dark theme's colour tokens.

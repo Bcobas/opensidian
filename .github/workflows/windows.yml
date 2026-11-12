@@ -143,13 +143,15 @@ jobs:
             }
             $before = (Get-FileHash -LiteralPath $document).Hash
             $stderr = Join-Path $env:RUNNER_TEMP "$name.log"
-            $app = Start-Process -FilePath $exe -ArgumentList ('"{0}"' -f $document) -WindowStyle Hidden -RedirectStandardError $stderr -PassThru
+            $arguments = @('"{0}"' -f $document)
+            if ($isPdf) { $arguments += '--pdf-page=2' }
+            $app = Start-Process -FilePath $exe -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardError $stderr -PassThru
             try {
               $deadline = (Get-Date).AddSeconds(45)
               do {
                 if ($app.HasExited) { throw "Opensidian exited with status $($app.ExitCode)" }
                 $loaded = Select-String -LiteralPath $stderr -Pattern '^\[reader\] opened standalone document' -Quiet
-                $displayed = !$isPdf -or (Select-String -LiteralPath $stderr -Pattern '^\[reader\] rendered PDF page 1$' -Quiet)
+                $displayed = !$isPdf -or (Select-String -LiteralPath $stderr -Pattern '^\[reader\] rendered PDF page 2$' -Quiet)
                 if ($loaded -and $displayed) { break }
                 Start-Sleep -Milliseconds 300
               } while ((Get-Date) -lt $deadline)
@@ -164,4 +166,30 @@ jobs:
           }
           if ((Get-ChildItem -LiteralPath $folder -Force).Count -ne $testFiles.Count) {
             throw "Opening the documents created extra files or folders"
+          }
+
+          $contents = Join-Path $env:RUNNER_TEMP 'package source'
+          New-Item -ItemType Directory -Path $contents | Out-Null
+          Set-Content -LiteralPath (Join-Path $contents 'opensidian-package.json') -Value '{"version":1,"entry":"Start.md"}'
+          Set-Content -LiteralPath (Join-Path $contents 'Start.md') -Value '# Portable package'
+          $package = Join-Path $env:RUNNER_TEMP 'Portable notes.opensidian.zip'
+          Compress-Archive -Path (Join-Path $contents '*') -DestinationPath $package
+          $before = (Get-FileHash -LiteralPath $package).Hash
+          $stderr = Join-Path $env:RUNNER_TEMP opensidian-package.log
+          $app = Start-Process -FilePath $exe -ArgumentList ('"{0}"' -f $package) -WindowStyle Hidden -RedirectStandardError $stderr -PassThru
+          try {
+            $deadline = (Get-Date).AddSeconds(45)
+            do {
+              if ($app.HasExited) { throw "Opensidian exited with status $($app.ExitCode)" }
+              $loaded = Select-String -LiteralPath $stderr -Pattern '^\[package\] opened temporary vault$' -Quiet
+              if ($loaded) { break }
+              Start-Sleep -Milliseconds 300
+            } while ((Get-Date) -lt $deadline)
+            if (!$loaded) { throw 'The temporary package window did not load' }
+            if ((Get-FileHash -LiteralPath $package).Hash -ne $before) { throw 'The archive was modified on open' }
+          } catch {
+            Get-Content -LiteralPath $stderr -Tail 20
+            throw
+          } finally {
+            if (!$app.HasExited) { Stop-Process -Id $app.Id }
           }

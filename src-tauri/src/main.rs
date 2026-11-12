@@ -1207,7 +1207,10 @@ struct PackageState(Option<portable::Session>);
 
 #[tauri::command]
 fn package_session(session: State<PackageState>) -> Option<(String, String)> {
-    session.0.as_ref().map(|session| (session.entry.clone(), session.title.clone()))
+    session.0.as_ref().map(|session| {
+        eprintln!("[package] opened temporary vault");
+        (session.entry.clone(), session.title.clone())
+    })
 }
 
 #[tauri::command]
@@ -1221,7 +1224,7 @@ fn open_package(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_package_pdf(session: State<PackageState>, path: String) -> Result<(), String> {
+fn open_package_pdf(session: State<PackageState>, path: String, anchor: String) -> Result<(), String> {
     #[cfg(windows)]
     {
         let session = session.0.as_ref().ok_or("No portable package open")?;
@@ -1233,11 +1236,12 @@ fn open_package_pdf(session: State<PackageState>, path: String) -> Result<(), St
         let full = full.to_string_lossy();
         let path = if let Some(unc) = full.strip_prefix(r"\\?\UNC\") { format!(r"\\{unc}") }
             else { full.strip_prefix(r"\\?\").unwrap_or(&full).to_owned() };
+        let (page, _) = pdf_frag(&anchor);
         std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
-            .arg(path).env_remove("VAULT_DIR").spawn().map(drop).map_err(|e| e.to_string())
+            .arg(path).arg(format!("--pdf-page={page}")).env_remove("VAULT_DIR").spawn().map(drop).map_err(|e| e.to_string())
     }
     #[cfg(not(windows))]
-    { let _ = (session, path); Err("The standalone PDF reader is available on Windows".to_owned()) }
+    { let _ = (session, path, anchor); Err("The standalone PDF reader is available on Windows".to_owned()) }
 }
 
 #[tauri::command]
@@ -3014,23 +3018,11 @@ impl<'a> TaskScan<'a> {
         if !self.on || self.item.is_none() {
             return None;
         }
-        let mut cs = buf.char_indices();
-        if cs.next()?.1 != '[' {
-            return None;
-        }
-        let (_, st) = cs.next()?;
-        let (close, rb) = cs.next()?;
-        if rb != ']' || matches!(st, ' ' | 'x' | 'X' | '[' | ']') || st.is_whitespace() {
-            return None;
-        }
-        let rest = &buf[close + 1..];
-        if !(rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t')) {
-            return None;
-        }
+        let (st, bytes) = note_views::custom_marker(buf)?;
         // the text event may start at a backslash escape; the "[" is at or after `at`
         let lb = self.src[at..].find('[').map_or(at, |i| at + i);
         self.emit(st, lb, evs);
-        Some(buf.len() - rest.trim_start().len())
+        Some(bytes)
     }
 }
 
@@ -6584,7 +6576,9 @@ fn main() {
     #[cfg(windows)]
     if env_vault.is_none() && switched.is_none() {
         if let Some(path) = argv_pick(&args).0.map(PathBuf::from).filter(|p| reader::is_document_argument(p)) {
-            return reader::run(&path, app_context());
+            let page = args.iter().filter_map(|arg| arg.to_str())
+                .find_map(|arg| arg.strip_prefix("--pdf-page=")?.parse().ok()).unwrap_or(1);
+            return reader::run(&path, app_context(), page);
         }
     }
     migrate::run_home(&home_path());

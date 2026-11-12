@@ -19,11 +19,34 @@ pub fn tasks<'a>(note: &'a str, content: &'a str) -> impl Iterator<Item = Task> 
         (body, content.len() - body.len())
     });
     let starts: Vec<_> = std::iter::once(0).chain(content.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    let mut first_in_item = false;
     Parser::new_ext(body, Options::ENABLE_TASKLISTS).into_offset_iter().filter_map(move |(event, range)| {
-        let Event::TaskListMarker(checked) = event else { return None };
-        let text = body[range.end..].lines().next().unwrap_or("").trim();
+        let first = first_in_item;
+        first_in_item = matches!(event, Event::Start(pulldown_cmark::Tag::Item))
+            || first && matches!(event, Event::Start(pulldown_cmark::Tag::Paragraph));
+        let (checked, end) = match event {
+            Event::TaskListMarker(checked) => (checked, range.end),
+            Event::Text(_) if first => {
+                let source = body[range.start..].lines().next()?;
+                let (_, bytes) = custom_marker(source)?;
+                (true, range.start + bytes)
+            }
+            _ => return None,
+        };
+        let text = body[end..].lines().next().unwrap_or("").trim();
         Some(Task { note: note.to_owned(), line: starts.partition_point(|&n| n <= range.start + offset), text: text.to_owned(), checked })
     })
+}
+
+pub fn custom_marker(text: &str) -> Option<(char, usize)> {
+    let mut chars = text.char_indices();
+    if chars.next()?.1 != '[' { return None; }
+    let (_, status) = chars.next()?;
+    let (close, bracket) = chars.next()?;
+    if bracket != ']' || matches!(status, ' ' | 'x' | 'X' | '[' | ']') || status.is_whitespace() { return None; }
+    let rest = &text[close + 1..];
+    if !(rest.is_empty() || rest.starts_with([' ', '\t'])) { return None; }
+    Some((status, text.len() - rest.trim_start().len()))
 }
 
 #[derive(Serialize)]
@@ -83,15 +106,16 @@ mod tests {
 
     #[test]
     fn reads_real_tasks_and_yaml_properties() {
-        let text = "\u{feff}---\r\nstatus: \"in progress\"\r\ntags:\r\n  - planning\r\n  - work\r\n---\r\n- [ ] open\r\n- [x] done\r\n```\r\n- [ ] example\r\n```\r\n";
+        let text = "\u{feff}---\r\nstatus: \"in progress\"\r\ntags:\r\n  - planning\r\n  - work\r\n---\r\n- [ ] open\r\n- [x] done\r\n- [/] partial\r\n```\r\n- [ ] example\r\n```\r\n";
         let properties = row("note", text);
         assert_eq!(properties.values["status"], "in progress");
         assert_eq!(properties.values["tags"], "planning, work");
         let tasks: Vec<_> = tasks("note", text).collect();
-        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks.len(), 3);
         assert_eq!(tasks[0].line, 7);
         assert_eq!(tasks[0].text, "open");
         assert!(!tasks[0].checked);
         assert!(tasks[1].checked);
+        assert_eq!(tasks[2].text, "partial");
     }
 }

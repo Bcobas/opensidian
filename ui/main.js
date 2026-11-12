@@ -6950,7 +6950,7 @@ async function wikiClick(e, a) {
   const g = gOf(a);
   if (!g) return;
   const n = wikiTarget(a) || curOf(g), an = wikiAnchor(a);   // R10: [[#H]] = this note
-  if (await toolPackageLink(n)) return;
+  if (await toolPackageLink(n, an)) return;
   if (await cvLinkOpen(n, an)) return;      // cvf-links CVR-A-096: [[X.canvas]] opens the canvas, never makes X.canvas.md
   if (a.classList.contains("wiki-unresolved")) await createNote(n);
   if (e.ctrlKey) {                            // R6.4: new tab, same group
@@ -7087,7 +7087,7 @@ async function pvWikiClick(a, e) {
   e.preventDefault();
   const g = gOf(a) || fg();                      // R20: event-time group (retained views move)
   const n = wikiTarget(a) || curOf(g), an = wikiAnchor(a);  // R10: [[#H]] = this note
-  if (await toolPackageLink(n)) return;
+  if (await toolPackageLink(n, an)) return;
   if (await cvLinkOpen(n, an)) return;          // cvf-links CVR-A-096: [[X.canvas]] opens the canvas
   if (a.classList.contains("wiki-unresolved"))   // R3.5: click creates the note
     await createNote(n);

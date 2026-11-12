@@ -269,6 +269,7 @@ fn preview(text: &str) -> String {
 struct Reader {
     file: Mutex<Result<OpenedDocument, String>>,
     ready: AtomicBool,
+    initial_page: usize,
 }
 
 impl Reader {
@@ -283,6 +284,7 @@ struct DocumentView {
     kind: Kind,
     text: String,
     pages: usize,
+    page: usize,
 }
 
 #[tauri::command]
@@ -294,7 +296,8 @@ fn standalone_document(reader: State<'_, Reader>) -> Result<DocumentView, String
             Content::Text(snapshot) => (snapshot.text.clone(), 0),
             Content::Pdf(pdf) => (String::new(), pdf.pages().len()),
         };
-        Ok(DocumentView { kind: doc.kind, text, pages })
+        let page = if (1..=pages).contains(&reader.initial_page) { reader.initial_page } else { 1 };
+        Ok(DocumentView { kind: doc.kind, text, pages, page })
     })
 }
 
@@ -362,14 +365,14 @@ fn image_response(result: Option<(&'static str, Vec<u8>)>) -> tauri::http::Respo
     }.expect("reader image response")
 }
 
-pub fn run(path: &Path, mut context: tauri::Context<Wry>) {
+pub fn run(path: &Path, mut context: tauri::Context<Wry>, initial_page: usize) {
     let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
     let title = format!("{name} - Opensidian");
     let file = OpenedDocument::open(path).map_err(|error| format!("Could not read {name}. {error}"));
 
     context.config_mut().app.windows.clear();
     tauri::Builder::default()
-        .manage(Reader { file: Mutex::new(file), ready: AtomicBool::new(false) })
+        .manage(Reader { file: Mutex::new(file), ready: AtomicBool::new(false), initial_page })
         .setup(move |app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("reader.html".into()))
                 .title(title)

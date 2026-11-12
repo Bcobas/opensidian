@@ -266,7 +266,7 @@ async function openDocument() {
     $("reader-pdf-selection").hidden = false;
     $("reader-ocr-options").hidden = false;
     pdfPane.hidden = false;
-    showPage(1);
+    showPage(opened.page || 1);
     return;
   }
   await showMode(false);

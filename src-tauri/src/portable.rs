@@ -274,6 +274,7 @@ pub fn export(fs: &Vault, name: &str, package: Package, expected: &str) -> Resul
     for (path, name) in &package.files {
         let data = if let Some(note) = package.notes.get(path) { rewrite(note, &package.files).into_bytes() }
             else { fs.p_read(path, MAX_PACKAGE - size).map_err(fail)? };
+        if note_file(path) && data.len() as u64 > MAX_NOTE_BYTES { return Err("A rewritten note exceeds the size limit".to_owned()); }
         size += data.len() as u64;
         if size > MAX_PACKAGE { return Err("Package exceeds 256 MiB".to_owned()); }
         zip.start_file(name, options).map_err(fail)?;
