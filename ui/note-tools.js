@@ -233,7 +233,7 @@ async function toolOpenPackage() {
 }
 
 async function toolPackageLink(path, anchor) {
-  if (!packageInfo || !path.startsWith("attachments/")) return false;
+  if (!packageInfo || notesCache.includes(path) || (!path.startsWith("attachments/") && !/\.pdf$/i.test(path))) return false;
   if (/\.pdf$/i.test(path)) {
     try { await inv("open_package_pdf", { path, anchor }); }
     catch (error) { say(errStr(error)); }
@@ -241,6 +241,74 @@ async function toolPackageLink(path, anchor) {
     say("Extract the package to open " + path);
   }
   return true;
+}
+
+async function toolSaveUpdatedPackage() {
+  if (!packageInfo?.[2]) return;
+  const { dialog, body, status } = toolDialog("Save updated package");
+  const form = toolNode("form");
+  const label = toolNode("label", "ZIP filename");
+  const name = toolNode("input");
+  name.required = true;
+  name.value = packageInfo[1].replace(/\.opensidian\.zip$/i, "") + " - updated.opensidian.zip";
+  label.append(name);
+  const entryLabel = toolNode("label", "Main note ");
+  const entry = toolSelect("Main note", []);
+  entryLabel.append(entry);
+  const fileList = toolNode("ul");
+  const details = toolNode("details");
+  const summary = toolNode("summary", "Files in the ZIP");
+  details.open = true;
+  details.append(summary, fileList);
+  const save = toolNode("button", "Choose folder and save ZIP");
+  form.append(label, entryLabel, details, save);
+  body.append(form);
+
+  let reviewed;
+  async function review() {
+    save.disabled = true;
+    reviewed = null;
+    const current = toolActiveNote();
+    const preferred = [entry.value, packageInfo[0] + ".md", current && current + ".md"];
+    const result = await inv("preview_updated_package");
+    const options = result.notes.map(note => {
+      const option = toolNode("option", note);
+      option.value = note;
+      return option;
+    });
+    entry.replaceChildren(...options);
+    entry.value = preferred.find(note => result.notes.includes(note)) || result.notes[0];
+    fileList.replaceChildren(...result.files.map(file => toolNode("li", file)));
+    summary.textContent = `Files in the ZIP (${result.files.length})`;
+    reviewed = result;
+    save.disabled = false;
+  }
+
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (save.disabled || !reviewed) return;
+    save.disabled = name.disabled = entry.disabled = true;
+    status("Choose a folder for the ZIP copy…");
+    try {
+      const path = await inv("save_updated_package", { name: name.value, entry: entry.value, token: reviewed.token });
+      if (!path) { status(""); save.disabled = false; return; }
+      status("Saved to " + path);
+      const open = toolButton("Open ZIP copy", async () => {
+        try { await inv("open_package", { path }); dialog.close(); }
+        catch (error) { status(errStr(error)); }
+      });
+      body.replaceChildren(open);
+      open.focus();
+    } catch (error) {
+      try { await review(); } catch (refreshError) { status(errStr(refreshError)); return; }
+      status(errStr(error));
+    } finally { name.disabled = entry.disabled = false; }
+  };
+
+  save.disabled = true;
+  status("Saving the current notes…");
+  try { await toolFlush(); await review(); status(""); }
+  catch (error) { status(errStr(error)); }
 }
 
 function toolSavePackageAsVault() {

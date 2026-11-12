@@ -300,23 +300,14 @@ fn rewrite(note: &Note, files: &BTreeMap<PathBuf, String>) -> String {
 
 pub fn export(fs: &Vault, package: Package, expected: &str) -> Result<String, String> {
     if expected != package.preview.token { return Err("The package contents changed. Review the files again before exporting.".to_owned()); }
-    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    let mut size = 0;
-    zip.start_file(MANIFEST, options).map_err(fail)?;
     let manifest = Manifest { version: 1, entry: package.entry };
-    serde_json::to_writer(&mut zip, &manifest).map_err(fail)?;
-    for (path, name) in &package.files {
-        let data = if let Some(note) = package.notes.get(path) { rewrite(note, &package.files).into_bytes() }
-            else { fs.p_read(path, MAX_PACKAGE - size).map_err(fail)? };
-        if note_file(path) && data.len() as u64 > MAX_NOTE_BYTES { return Err("A rewritten note exceeds the size limit".to_owned()); }
-        size += data.len() as u64;
-        if size > MAX_PACKAGE { return Err("Package exceeds 256 MiB".to_owned()); }
-        zip.start_file(name, options).map_err(fail)?;
-        zip.write_all(&data).map_err(fail)?;
-    }
-    let data = zip.finish().map_err(fail)?.into_inner();
-    if data.len() as u64 > MAX_PACKAGE { return Err("ZIP file exceeds 256 MiB".to_owned()); }
+    let data = zip_bytes(manifest, &package.files, |path, remaining| {
+        if let Some(note) = package.notes.get(path) {
+            Ok(rewrite(note, &package.files).into_bytes())
+        } else {
+            fs.p_read(path, remaining).map_err(fail)
+        }
+    })?;
     let note = package.source;
     let stem = note.file_stem().ok_or("Invalid note name")?.to_string_lossy();
     for counter in 1..=10_000 {
@@ -335,10 +326,39 @@ pub fn export(fs: &Vault, package: Package, expected: &str) -> Result<String, St
     Err("Could not find an available filename".to_owned())
 }
 
+fn zip_bytes(
+    manifest: Manifest, files: &BTreeMap<PathBuf, String>, read: impl Fn(&Path, u64) -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
+    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let mut size = 0;
+    zip.start_file(MANIFEST, options).map_err(fail)?;
+    serde_json::to_writer(&mut zip, &manifest).map_err(fail)?;
+    for (path, name) in files {
+        let data = read(path, MAX_PACKAGE - size)?;
+        if note_file(path) && data.len() as u64 > MAX_NOTE_BYTES { return Err("A note exceeds the size limit".to_owned()); }
+        size += data.len() as u64;
+        if size > MAX_PACKAGE { return Err("Package exceeds 256 MiB".to_owned()); }
+        zip.start_file(name, options).map_err(fail)?;
+        zip.write_all(&data).map_err(fail)?;
+    }
+    let data = zip.finish().map_err(fail)?.into_inner();
+    if data.len() as u64 > MAX_PACKAGE { return Err("ZIP file exceeds 256 MiB".to_owned()); }
+    Ok(data)
+}
+
 pub struct Session {
     pub directory: PathBuf,
     pub entry: String,
     pub title: String,
+}
+
+#[cfg(windows)]
+#[derive(Serialize)]
+pub struct CopyPreview {
+    files: Vec<String>,
+    notes: Vec<String>,
+    token: String,
 }
 
 impl Drop for Session {
@@ -353,13 +373,36 @@ impl Session {
     }
 
     #[cfg(windows)]
+    pub fn preview_copy(&self) -> Result<CopyPreview, String> {
+        let source = Vault::open(&self.directory).map_err(fail)?;
+        Ok(inspect_copy(&source)?.0)
+    }
+
+    #[cfg(windows)]
+    pub fn save_updated_zip(&self, parent: &Path, name: &str, entry: &str, expected: &str) -> Result<PathBuf, String> {
+        let relative = safe_rel(name).filter(|path| path.file_name() == Some(std::ffi::OsStr::new(name)) && is_package(path))
+            .ok_or("Enter a valid .opensidian.zip filename")?;
+        let parent = self.destination_parent(parent)?;
+        let destination = Vault::open(&parent).map_err(fail)?;
+        let source = Vault::open(&self.directory).map_err(fail)?;
+        let (preview, files) = inspect_copy(&source)?;
+        if preview.token != expected { return Err("The package contents changed. Review the files again before saving.".to_owned()); }
+        if !preview.notes.iter().any(|note| note == entry) { return Err("Choose an existing main note".to_owned()); }
+        let version = if Path::new(entry).components().count() == 1 && files.keys().all(|path| v1_file(path)) { 1 } else { 2 };
+        let manifest = Manifest { version, entry: entry.to_owned() };
+        let data = zip_bytes(manifest, &files, |path, remaining| source.p_read(path, remaining).map_err(fail))?;
+        destination.write_new_atomic(&relative, &data).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists { "A file with that name already exists".to_owned() }
+            else { fail(error) }
+        })?;
+        Ok(parent.join(relative))
+    }
+
+    #[cfg(windows)]
     pub fn save_as_vault(&self, parent: &Path, name: &str) -> Result<PathBuf, String> {
         let relative = safe_rel(name).filter(|path| path.file_name() == Some(std::ffi::OsStr::new(name)))
             .ok_or("Enter a valid name for the new vault")?;
-        let parent = parent.canonicalize().map_err(fail)?;
-        if parent.starts_with(&self.directory) {
-            return Err("Choose a location outside the temporary package".to_owned());
-        }
+        let parent = self.destination_parent(parent)?;
         let destination = Vault::open(&parent).map_err(fail)?;
         match destination.p_stat(&relative) {
             Ok(_) => return Err("A file or folder with that name already exists".to_owned()),
@@ -384,6 +427,13 @@ impl Session {
         }
         Ok(parent.join(relative))
     }
+
+    #[cfg(windows)]
+    fn destination_parent(&self, parent: &Path) -> Result<PathBuf, String> {
+        let parent = parent.canonicalize().map_err(fail)?;
+        if parent.starts_with(&self.directory) { return Err("Choose a location outside the temporary package".to_owned()); }
+        Ok(parent)
+    }
 }
 
 fn remove_temporary_directory(path: &Path) {
@@ -394,28 +444,81 @@ fn remove_temporary_directory(path: &Path) {
 
 #[cfg(windows)]
 fn copy_vault_files(source: &Vault, destination: &Vault, stage: &Path) -> Result<(), String> {
+    walk_visible_files(source, |path, folder| {
+        let target = stage.join(path);
+        if folder {
+            destination.p_mkdir(&target, false).map_err(fail)?;
+        } else {
+            let mut input = source.open_read(path).map_err(fail)?;
+            let mut output = destination.create_new(&target, false).map_err(fail)?;
+            std::io::copy(&mut input, &mut output).map_err(fail)?;
+            output.sync_all().map_err(fail)?;
+        }
+        Ok(())
+    })
+}
+
+#[cfg(windows)]
+fn walk_visible_files(source: &Vault, mut visit: impl FnMut(&Path, bool) -> Result<(), String>) -> Result<(), String> {
     let mut pending = vec![PathBuf::new()];
     while let Some(folder) = pending.pop() {
         for (name, kind) in source.p_list(&folder).map_err(fail)? {
             if name.starts_with('.') { continue; }
             let path = folder.join(name);
-            let target = stage.join(&path);
             match kind {
                 "folder" => {
-                    destination.p_mkdir(&target, false).map_err(fail)?;
+                    visit(&path, true)?;
                     pending.push(path);
                 }
-                "file" => {
-                    let mut input = source.open_read(&path).map_err(fail)?;
-                    let mut output = destination.create_new(&target, false).map_err(fail)?;
-                    std::io::copy(&mut input, &mut output).map_err(fail)?;
-                    output.sync_all().map_err(fail)?;
-                }
+                "file" => visit(&path, false)?,
                 _ => {},
             }
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn inspect_copy(source: &Vault) -> Result<(CopyPreview, BTreeMap<PathBuf, String>), String> {
+    let mut files = BTreeMap::new();
+    let mut used = BTreeSet::new();
+    walk_visible_files(source, |path, folder| {
+        if !folder {
+            let name = opensidian_lib::vault_path_string(path);
+            if name.eq_ignore_ascii_case(MANIFEST) { return Ok(()); }
+            if safe_rel(&name).as_deref() != Some(path) { return Err("A file in the package has an invalid path".to_owned()); }
+            if !used.insert(name.to_lowercase()) { return Err("Two package filenames differ only by case".to_owned()); }
+            files.insert(path.to_owned(), name);
+            if files.len() >= MAX_FILES { return Err("Too many files in the package".to_owned()); }
+        }
+        Ok(())
+    })?;
+    let mut fingerprint = Sha256::new();
+    let mut notes = Vec::new();
+    let mut size: u64 = 0;
+    for (path, name) in &files {
+        let stat = source.p_stat(path).map_err(fail)?;
+        size = size.saturating_add(stat.size);
+        if size > MAX_PACKAGE { return Err("Package exceeds 256 MiB".to_owned()); }
+        if note_file(path) && stat.size > MAX_NOTE_BYTES { return Err("A note exceeds the size limit".to_owned()); }
+        if archive_note(path) { notes.push(name.clone()); }
+        fingerprint.update(name);
+        fingerprint.update(b"\0");
+        fingerprint.update(stat.size.to_le_bytes());
+        fingerprint.update(stat.mtime_ms.to_le_bytes());
+    }
+    if notes.is_empty() { return Err("Add a Markdown note before saving the package".to_owned()); }
+    let preview = CopyPreview { files: files.values().cloned().collect(), notes, token: format!("{:x}", fingerprint.finalize()) };
+    Ok((preview, files))
+}
+
+fn archive_note(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "md")
+}
+
+fn v1_file(path: &Path) -> bool {
+    (path.components().count() == 1 && archive_note(path))
+        || (path.components().count() == 2 && path.starts_with("attachments"))
 }
 
 pub fn is_package(path: &Path) -> bool {
@@ -439,14 +542,14 @@ pub fn unpack(path: &Path) -> Result<Session, String> {
     zip.by_name(MANIFEST).map_err(|_| "This ZIP is not an Opensidian package")?.take(65537).read_to_end(&mut data).map_err(fail)?;
     if data.len() > 65536 { return Err("Package manifest is too large".to_owned()); }
     let manifest: Manifest = serde_json::from_slice(&data).map_err(fail)?;
-    let archive_note = |path: &Path| path.components().count() == 1 && path.extension().is_some_and(|ext| ext == "md");
-    let entry = safe_rel(&manifest.entry).filter(|path| archive_note(path))
+    if !matches!(manifest.version, 1 | 2) { return Err("Unsupported package version".to_owned()); }
+    let entry = safe_rel(&manifest.entry).filter(|path| archive_note(path) && (manifest.version == 2 || path.components().count() == 1))
         .ok_or("Invalid package entry note")?;
-    if manifest.version != 1 { return Err("Unsupported package version".to_owned()); }
+    let entry_name = opensidian_lib::vault_path_string(&entry);
     let title = path.file_name().ok_or("Invalid package filename")?.to_string_lossy().into_owned();
     let directory = std::env::temp_dir().canonicalize().map_err(fail)?.join(format!("opensidian-package-{}", opensidian_lib::os_random_hex().map_err(fail)?));
     std::fs::create_dir(&directory).map_err(fail)?;
-    let session = Session { directory, entry: entry.file_stem().unwrap().to_string_lossy().into_owned(), title };
+    let session = Session { directory, entry: entry_name.strip_suffix(".md").unwrap().to_owned(), title };
     let fs = Vault::open(&session.directory).map_err(fail)?;
     let mut used = BTreeSet::new();
     let mut total = 0;
@@ -454,9 +557,9 @@ pub fn unpack(path: &Path) -> Result<Session, String> {
         let mut file = zip.by_index(index).map_err(fail)?;
         if file.name() == MANIFEST { continue; }
         let raw = file.name();
+        if raw.eq_ignore_ascii_case(MANIFEST) { return Err("Conflicting manifest filename in the package".to_owned()); }
         let safe = safe_rel(raw).filter(|path| opensidian_lib::vault_path_string(path) == raw)
-            .filter(|path| archive_note(path)
-                || (path.components().count() == 2 && path.starts_with("attachments")))
+            .filter(|path| manifest.version == 2 || v1_file(path))
             .ok_or("Unexpected path in the package")?;
         if !used.insert(raw.to_lowercase()) || file.is_dir() || file.is_symlink() { return Err("Unexpected file in the package".to_owned()); }
         let cap = if note_file(&safe) { MAX_NOTE_BYTES } else { MAX_PACKAGE };
@@ -520,14 +623,16 @@ mod tests {
     #[test]
     fn rejects_archive_paths_that_leave_the_temporary_vault() {
         let root = fixture();
-        let path = root.directory.join("invalid.opensidian.zip");
-        let mut zip = ZipWriter::new(std::fs::File::create(&path).unwrap());
-        zip.start_file(MANIFEST, SimpleFileOptions::default()).unwrap();
-        zip.write_all(br#"{"version":1,"entry":"Main.md"}"#).unwrap();
-        zip.start_file("../escape.md", SimpleFileOptions::default()).unwrap();
-        zip.write_all(b"no").unwrap();
-        drop(zip.finish().unwrap());
-        assert!(unpack(&path).err().unwrap().contains("Unexpected path"));
+        for version in [1, 2] {
+            let path = root.directory.join(format!("invalid-{version}.opensidian.zip"));
+            let mut zip = ZipWriter::new(std::fs::File::create(&path).unwrap());
+            zip.start_file(MANIFEST, SimpleFileOptions::default()).unwrap();
+            serde_json::to_writer(&mut zip, &Manifest { version, entry: "Main.md".to_owned() }).unwrap();
+            zip.start_file("../escape.md", SimpleFileOptions::default()).unwrap();
+            zip.write_all(b"no").unwrap();
+            drop(zip.finish().unwrap());
+            assert!(unpack(&path).err().unwrap().contains("Unexpected path"));
+        }
     }
 
     #[cfg(windows)]
@@ -579,5 +684,50 @@ mod tests {
         let _locked = std::fs::OpenOptions::new().read(true).share_mode(0).open(path).unwrap();
         assert!(source.save_as_vault(&destination.directory, "New vault").is_err());
         assert_eq!(std::fs::read_dir(&destination.directory).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repacks_edits_with_nested_files_and_a_selected_main_note() {
+        let temporary = fixture();
+        let destination = fixture();
+        let source = Vault::open(&temporary.directory).unwrap();
+        let original = destination.directory.join("Original.opensidian.zip");
+        std::fs::write(&original, b"original archive").unwrap();
+        let main = "Notas/Café.md";
+        source.write_atomic(Path::new("Start.md"), "[Café](Notas/Caf%C3%A9.md)".as_bytes(), false).unwrap();
+        source.write_atomic(Path::new(main), b"# Edited\n\n![Photo](../media/photo.png)", false).unwrap();
+        source.write_atomic(Path::new("media/photo.png"), b"photo", false).unwrap();
+        source.write_atomic(Path::new(".obsidian/workspace.json"), b"temporary config", false).unwrap();
+        let preview = temporary.preview_copy().unwrap();
+        assert!(preview.notes.iter().any(|note| note == main));
+        assert_eq!(preview.files.len(), 3);
+        assert!(temporary.save_updated_zip(&destination.directory, "Updated.opensidian.zip", main, "stale").is_err());
+        assert!(temporary.save_updated_zip(&destination.directory, "Original.opensidian.zip", main, &preview.token).is_err());
+        assert_eq!(std::fs::read(original).unwrap(), b"original archive");
+        let updated = temporary.save_updated_zip(&destination.directory, "Updated.opensidian.zip", main, &preview.token).unwrap();
+        drop(source);
+        drop(temporary);
+        let reopened = unpack(&updated).unwrap();
+        assert_eq!(reopened.entry, "Notas/Café");
+        assert_eq!(std::fs::read(reopened.directory.join(main)).unwrap(), b"# Edited\n\n![Photo](../media/photo.png)");
+        assert_eq!(std::fs::read(reopened.directory.join("media/photo.png")).unwrap(), b"photo");
+        assert!(!reopened.directory.join(".obsidian").exists());
+        assert_eq!(crate::Index::build(&reopened.directory).backlinks("Notas/Café"), ["Start"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repacking_a_flat_package_keeps_the_older_layout() {
+        let temporary = fixture();
+        let destination = fixture();
+        let source = Vault::open(&temporary.directory).unwrap();
+        source.write_atomic(Path::new("Start.md"), b"# Start\n", false).unwrap();
+        source.write_atomic(Path::new("attachments/image.png"), b"fixture", false).unwrap();
+        let preview = temporary.preview_copy().unwrap();
+        let updated = temporary.save_updated_zip(&destination.directory, "Flat.opensidian.zip", "Start.md", &preview.token).unwrap();
+        let mut archive = ZipArchive::new(std::fs::File::open(updated).unwrap()).unwrap();
+        let manifest: Manifest = serde_json::from_reader(archive.by_name(MANIFEST).unwrap()).unwrap();
+        assert_eq!(manifest.version, 1);
     }
 }

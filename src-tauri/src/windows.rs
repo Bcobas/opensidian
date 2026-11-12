@@ -56,6 +56,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
 pub enum PackagePicker {
     Archive,
     VaultParent,
+    ZipParent,
 }
 
 /// Show a modal picker on the window's UI thread.
@@ -84,8 +85,12 @@ pub fn pick_package_path(owner: HWND, picker: PackagePicker) -> ::windows::core:
                 }])?;
                 options |= FOS_FILEMUSTEXIST;
             }
-            PackagePicker::VaultParent => {
-                dialog.SetTitle(w!("Choose where to save the vault"))?;
+            PackagePicker::VaultParent | PackagePicker::ZipParent => {
+                let title = match picker {
+                    PackagePicker::VaultParent => w!("Choose where to save the vault"),
+                    _ => w!("Choose where to save the ZIP copy"),
+                };
+                dialog.SetTitle(title)?;
                 dialog.SetOkButtonLabel(w!("Save here"))?;
                 options = (options & !FOS_FILEMUSTEXIST) | FOS_PICKFOLDERS;
             }

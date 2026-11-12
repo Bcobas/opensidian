@@ -1272,12 +1272,44 @@ async fn save_package_as_vault(app: tauri::AppHandle, window: tauri::Window, nam
     }
 }
 
+#[cfg(windows)]
+#[tauri::command]
+async fn preview_updated_package(app: tauri::AppHandle) -> Result<portable::CopyPreview, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        let package = app.state::<PackageState>();
+        package.0.as_ref().ok_or("Open a portable package first")?.preview_copy()
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn save_updated_package(
+    app: tauri::AppHandle, window: tauri::Window, name: String, entry: String, token: String,
+) -> Result<Option<String>, String> {
+    use tauri::Manager;
+    if app.state::<PackageState>().0.is_none() { return Err("Open a portable package first".to_owned()); }
+    let name = name.trim().to_owned();
+    if !safe_rel(&name).is_some_and(|path| path.file_name() == Some(std::ffi::OsStr::new(&name)) && portable::is_package(&path)) {
+        return Err("Enter a valid .opensidian.zip filename".to_owned());
+    }
+    let Some(parent) = choose_package_path(window, windows::PackagePicker::ZipParent).await? else { return Ok(None) };
+    tauri::async_runtime::spawn_blocking(move || {
+        let package = app.state::<PackageState>();
+        let session = package.0.as_ref().ok_or("Open a portable package first")?;
+        let vault = app.state::<Vault>();
+        let _guard = vault.index.lock().map_err(|error| error.to_string())?;
+        let path = session.save_updated_zip(&parent, &name, &entry, &token)?;
+        Ok(Some(path.display().to_string()))
+    }).await.map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 fn open_package_pdf(session: State<PackageState>, path: String, anchor: String) -> Result<(), String> {
     #[cfg(windows)]
     {
         let session = session.0.as_ref().ok_or("No portable package open")?;
-        let relative = safe_rel(&path).filter(|path| path.starts_with("attachments") && path.extension()
+        let relative = safe_rel(&path).filter(|path| path.extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))).ok_or("Invalid package PDF")?;
         let fs = vaultfs::Vault::open(&session.directory).map_err(|e| e.to_string())?;
         if !fs.is_file(&relative) { return Err("PDF is missing from the package".to_owned()); }
@@ -6902,6 +6934,8 @@ fn main() {
             list_notes, list_images, canvas_io, canvas_attach, paste_image, read_note, write_note, create_note, render, render_blocks, block_lines, render_view, highlight_blocks, graph, graph_local, graph_view, vault_get, pick_vault,
             note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
             preview_package, export_package, package_session, open_package, pick_package, save_package_as_vault, open_package_pdf,
+            #[cfg(windows)] preview_updated_package,
+            #[cfg(windows)] save_updated_package,
             capture_web,
             create_vault, create_vault_dir, open_vault_window, switch_show, switch_ready, boot_notice, home_dir, list_dirs, list_folders, create_dir, backlinks, search,
             list_bookmarks, toggle_bookmark, bookmark_rows, bm_group_new, bm_group_rename, bm_group_delete, bm_move, bm_add, bm_drag, bm_add_at, recent_vaults, rename_note, media_rename, media_read, move_note, update_links, delete_note, link_consent, set_link_consent, strict_line_breaks, set_strict_line_breaks, qs_new_name, readable_line_length, graph_settings, set_graph_settings, tags, tag_counts,
