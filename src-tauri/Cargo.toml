@@ -52,7 +52,7 @@ libc = "=0.2.189"
 #        (was dev-only for builtins.rs; now also shipped). soup3: linux block below
 sha2 = "=0.10.9"
 url = "=2.5.8"
-dom_query = "=0.27.0"
+dom_query = { version = "=0.27.0", features = ["markdown"] }
 # Portable note bundles and YAML frontmatter use their established formats.
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 yaml-rust2 = { version = "=0.10.4", default-features = false }

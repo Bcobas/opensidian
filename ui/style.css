@@ -836,6 +836,11 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
 .note-tool-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin: 0.35rem 0 }
 .note-tool-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; margin-block: 0.8rem }
 .note-tool-compare textarea { display: block; width: 100%; min-height: 45vh; resize: vertical; font-family: var(--font-monospace) }
+.note-tool fieldset { border: 1px solid var(--border); margin: 0 0 0.8rem }
+.note-tool fieldset label, .note-tool form label { display: block }
+.note-tool form input:not([type="checkbox"]), .note-tool form textarea { display: block; width: 100%; margin-block: 0.35rem 0.8rem }
+.note-tool form label:has(input[type="checkbox"]) { margin-block: 0.35rem 0.8rem }
+.note-tool section > button + button { margin-inline-start: 0.5rem }
 @media (max-width: 620px) {
   .note-tool-compare { grid-template-columns: 1fr }
   .note-tool-compare textarea { min-height: 25vh }

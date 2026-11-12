@@ -52,6 +52,13 @@ jobs:
           cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian history::tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_views::tests
+      - name: Test portable packages and web capture
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian portable::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian web_clip::tests
       - name: Test OCR on a scanned PDF
         working-directory: src-tauri
         shell: pwsh

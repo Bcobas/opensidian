@@ -72,6 +72,7 @@ function noteErr(m) {
 window.addEventListener("error", e => noteErr(e.message));
 window.addEventListener("unhandledrejection", e => noteErr(e.reason && e.reason.message || e.reason));
 let vaultPath = null, pmode = null, bpath = null;
+let packageInfo = null;
 let bootNote = null;   // vaultarg: the rejected-argument reason, taken once from boot_notice
 /* vaultarg census: [vault:<open vault|->] always; [vargerr:<reason>] while that
    reason is ON SCREEN (picker error line, or the notice banner it was said into).
@@ -4603,6 +4604,7 @@ function tabMenu(e, g, i, hdr) {
   // ---- group 7 (2 rows) ----
   sep();
   item("Open version history", () => { closeMenu(); void toolHistory(tab.name); });
+  item("Export note with its files", () => { closeMenu(); void toolPortableExport(tab.name); });
   item("Open linked view", null, "Missing subsystem: submenu panels in ctxmenu — four of its five children already have backends here (R7 local graph, backlinks, outgoing, outline), so this is the highest-value row in this list");
   // ---- group 8 (3 rows) ----
   sep();
@@ -6948,6 +6950,7 @@ async function wikiClick(e, a) {
   const g = gOf(a);
   if (!g) return;
   const n = wikiTarget(a) || curOf(g), an = wikiAnchor(a);   // R10: [[#H]] = this note
+  if (await toolPackageLink(n)) return;
   if (await cvLinkOpen(n, an)) return;      // cvf-links CVR-A-096: [[X.canvas]] opens the canvas, never makes X.canvas.md
   if (a.classList.contains("wiki-unresolved")) await createNote(n);
   if (e.ctrlKey) {                            // R6.4: new tab, same group
@@ -7084,6 +7087,7 @@ async function pvWikiClick(a, e) {
   e.preventDefault();
   const g = gOf(a) || fg();                      // R20: event-time group (retained views move)
   const n = wikiTarget(a) || curOf(g), an = wikiAnchor(a);  // R10: [[#H]] = this note
+  if (await toolPackageLink(n)) return;
   if (await cvLinkOpen(n, an)) return;          // cvf-links CVR-A-096: [[X.canvas]] opens the canvas
   if (a.classList.contains("wiki-unresolved"))   // R3.5: click creates the note
     await createNote(n);
@@ -9550,6 +9554,9 @@ const CMDS = [
   ["opensidian:daily", "Open today's note", [], toolDaily, () => !!vaultPath],
   ["opensidian:tasks", "Open vault tasks", [], toolTasks, () => !!vaultPath],
   ["opensidian:note-table", "Open note table", [], toolNoteTable, () => !!vaultPath],
+  ["opensidian:package-export", "Export note with its files", [], () => toolPortableExport(toolActiveNote()), () => !!toolActiveNote()],
+  ["opensidian:package-open", "Open portable package", [], toolOpenPackage],
+  ["opensidian:web-capture", "Capture web content", [], toolWebCapture, () => !!vaultPath],
   ["app:open-settings",        "Open settings",                       ["ctrl+,"],               () => cmdSettings()],
   // R14: the theme switch is a registry entry like any other — no bespoke
   // keystroke, no menu item of its own. It ships with NO default chord on
@@ -11762,8 +11769,13 @@ async function enterVault() {
   // nothing in it survived the degrade rule — the ordinary first-launch path.
   // Both land on a usable window; that is the whole point of R28.13.
   if (!await wsApply(wdoc, names)) {
-    if (names.length) await openInTab(names[0], "boot");
+    if (names.length) await openInTab(packageInfo && names.includes(packageInfo[0]) ? packageInfo[0] : names[0], "boot");
     else renderTabs(g);
+  }
+  if (packageInfo) {
+    $("vswitch").textContent = packageInfo[1];
+    $("vswitch").title = "Temporary vault. Changes here are separate from the ZIP.";
+    say("Temporary package. Changes here are separate from the ZIP.");
   }
   perf.mark("boot", 0, { notes: names.length });   // perf: page start -> vault ready (first note rendered)
   Ed.fontWarm(fg());   // perfslow: the live preview's faces are built in idle time after boot, not inside the first note open that shows them
@@ -11994,6 +12006,8 @@ function sgearTok() {
   // the notice banner when a vault opened, the picker's error line otherwise.
   // textContent only (say / p-err), never HTML.
   bootNote = await inv("boot_notice").catch(() => null);
+  packageInfo = await inv("package_session").catch(() => null);
+  $("p-open-package").onclick = toolOpenPackage;
   vaultPath = await inv("vault_get");
   if (vaultPath) await enterVault(); else showPicker();
   if (bootNote) { if (vaultPath) say(bootNote, "vaultarg"); else {

@@ -29,6 +29,14 @@ To open a standalone `.md`, `.markdown`, `.txt`, or `.pdf` file, right-click it 
 - **PDF:** use the page controls to browse the original. Enter pages or ranges such as `1-3, 6`, or leave the field blank for all pages. **Convert to Markdown** opens an editable draft beside the original. **Save as Markdown** creates a sibling `.md` file with an available name. Complex layouts such as tables or columns may need editing.
 - **OCR:** install [Tesseract for Windows](https://tesseract-ocr.github.io/tessdoc/Installation.html#windows) separately with Spanish (`spa`) or English (`eng`) language data. Enable **OCR scanned pages** and select the document language. Opensidian extracts existing text first and runs Tesseract locally only on selected pages without extractable text. By default it looks in `Program Files\Tesseract-OCR`. For a custom install, set `OPENSIDIAN_TESSERACT` to the full path to `tesseract.exe` before launching Opensidian.
 
+Open the command palette with **Ctrl+P** to use the vault tools.
+
+- **Open version history** compares saved revisions with the current note. Restoring a revision keeps the replaced text in history. Up to 30 revisions and 64 MiB are kept per vault note.
+- **Export note with its files** previews a portable ZIP containing the current note, its local attachments, and the linked notes you select. The ZIP contains Markdown with relative links and a manifest for **Open portable package**. You can also pass the `.opensidian.zip` path to `opensidian.exe`. Opensidian opens the main note in a temporary vault and rebuilds its search and backlinks. Extract the ZIP to work on a permanent copy in any editor.
+- **Open today's note** opens or creates `Daily/YYYY-MM-DD.md`. **Open vault tasks** lists Markdown tasks with status and text filters and links to their source lines.
+- **Open note table** filters and sorts notes by name or YAML frontmatter properties.
+- **Capture web content** saves a public page URL or a pasted selection into `Web captures/`, with an option to download supported images into the vault. Page capture uses the HTML sent by the site and the system `curl` command.
+
 To build locally, install the MSVC C++ build tools, WebView2, Rust 1.98.0, and Tauri CLI 2.11.4. From the repository root, run:
 
 ```powershell

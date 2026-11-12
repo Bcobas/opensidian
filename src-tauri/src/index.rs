@@ -360,6 +360,32 @@ pub fn links_in(s: &str) -> Vec<String> {
             None => break,
         }
     }
+    if s.contains("](") || s.contains("]:") {
+        use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
+        for event in Parser::new_ext(s, Options::ENABLE_YAML_STYLE_METADATA_BLOCKS) {
+            if let Event::Start(Tag::Link { link_type, dest_url, .. }) = event {
+                if matches!(link_type, LinkType::Autolink | LinkType::Email) { continue; }
+                let path = dest_url.split('#').next().unwrap_or_default().trim_start_matches("./");
+                if !path.ends_with(".md") || path.starts_with('/') || path.contains([':', '\\']) { continue; }
+                let mut bytes = Vec::with_capacity(path.len());
+                let mut input = path.as_bytes().iter().copied();
+                while let Some(byte) = input.next() {
+                    if byte == b'%' {
+                        let Some(hi) = input.next().and_then(|byte| (byte as char).to_digit(16)) else { bytes.clear(); break };
+                        let Some(lo) = input.next().and_then(|byte| (byte as char).to_digit(16)) else { bytes.clear(); break };
+                        bytes.push((hi * 16 + lo) as u8);
+                    } else {
+                        bytes.push(byte);
+                    }
+                }
+                if let Ok(path) = String::from_utf8(bytes) {
+                    if !path.contains([':', '\\', '|', '#']) && path.split('/').all(|part| !part.is_empty() && !part.starts_with('.')) {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+    }
     out
 }
 

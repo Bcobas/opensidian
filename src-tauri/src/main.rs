@@ -30,6 +30,8 @@ use opensidian_lib::index;
 mod migrate;
 mod history;
 mod note_views;
+mod portable;
+mod web_clip;
 use opensidian_lib::outline;
 mod pdf;
 mod plugins;
@@ -1173,6 +1175,116 @@ fn vault_tasks(v: State<Vault>) -> Result<Vec<note_views::Task>, String> {
 fn vault_note_rows(v: State<Vault>) -> Result<Vec<note_views::Row>, String> {
     let ix = v.index.lock().map_err(|e| e.to_string())?;
     Ok(ix.docs().map(|(note, text, _)| note_views::row(note, text)).collect())
+}
+
+fn package_catalog(v: &Vault) -> Result<Vec<String>, String> {
+    let ix = v.index.lock().map_err(|e| e.to_string())?;
+    Ok(ix.names().iter().map(|name| format!("{name}.md")).chain(ix.images().iter().cloned()).collect())
+}
+
+#[tauri::command]
+async fn preview_package(v: State<'_, Vault>, name: String, selected: Vec<String>) -> Result<portable::Preview, String> {
+    let root = cur_vault(&v).ok_or("no vault open")?;
+    let catalog = package_catalog(&v)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let fs = vaultfs::Vault::open(&root).map_err(|e| e.to_string())?;
+        Ok(portable::plan(&fs, catalog, &name, &selected)?.preview)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn export_package(v: State<'_, Vault>, name: String, selected: Vec<String>, token: String) -> Result<String, String> {
+    let root = cur_vault(&v).ok_or("no vault open")?;
+    let catalog = package_catalog(&v)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let fs = vaultfs::Vault::open(&root).map_err(|e| e.to_string())?;
+        let package = portable::plan(&fs, catalog, &name, &selected)?;
+        portable::export(&fs, &name, package, &token)
+    }).await.map_err(|e| e.to_string())?
+}
+
+struct PackageState(Option<portable::Session>);
+
+#[tauri::command]
+fn package_session(session: State<PackageState>) -> Option<(String, String)> {
+    session.0.as_ref().map(|session| (session.entry.clone(), session.title.clone()))
+}
+
+#[tauri::command]
+fn open_package(path: String) -> Result<(), String> {
+    let path = PathBuf::from(path.trim().trim_matches('"'));
+    if !path.is_absolute() || !portable::is_package(&path) || !path.is_file() {
+        return Err("Choose an existing .opensidian.zip file using its full path.".to_owned());
+    }
+    std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+        .arg(path).env_remove("VAULT_DIR").spawn().map(drop).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_package_pdf(session: State<PackageState>, path: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let session = session.0.as_ref().ok_or("No portable package open")?;
+        let relative = safe_rel(&path).filter(|path| path.starts_with("attachments") && path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))).ok_or("Invalid package PDF")?;
+        let fs = vaultfs::Vault::open(&session.directory).map_err(|e| e.to_string())?;
+        if !fs.is_file(&relative) { return Err("PDF is missing from the package".to_owned()); }
+        let full = session.directory.join(relative);
+        let full = full.to_string_lossy();
+        let path = if let Some(unc) = full.strip_prefix(r"\\?\UNC\") { format!(r"\\{unc}") }
+            else { full.strip_prefix(r"\\?\").unwrap_or(&full).to_owned() };
+        std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+            .arg(path).env_remove("VAULT_DIR").spawn().map(drop).map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    { let _ = (session, path); Err("The standalone PDF reader is available on Windows".to_owned()) }
+}
+
+#[tauri::command]
+async fn capture_web(
+    app: tauri::AppHandle, title: String, url: String, fragment: Option<String>, images: bool,
+) -> Result<(String, usize), String> {
+    let title = title.trim();
+    let title = safe_rel(title).filter(|name| name.components().count() == 1).ok_or("Enter a valid note title")?;
+    let name = format!("{}/{}", web_clip::FOLDER, title.to_string_lossy());
+    let v = app.state::<Vault>();
+    let root = cur_vault(&v).ok_or("no vault open")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let capture = web_clip::capture(&url, fragment.as_deref(), images)?;
+        let v = app.state::<Vault>();
+        let mut ix = v.index.lock().map_err(|e| e.to_string())?;
+        let fs = vaultfs::Vault::open(&root).map_err(|e| e.to_string())?;
+        if fs.is_file(&note_rel(&name).ok_or("Invalid note name")?) { return Err("A note with that title already exists in Web captures".to_owned()); }
+        let folder = Path::new(web_clip::FOLDER).join("Assets");
+        let mut written = Vec::new();
+        let save = (|| -> Result<(), String> {
+            if !capture.assets.is_empty() { fs.mkdir_p(&folder).map_err(|e| e.to_string())?; }
+            for (file, bytes) in &capture.assets {
+                let path = folder.join(file);
+                if fs.is_file(&path) {
+                    if fs.p_read(&path, MAX_IMG_BYTES).map_err(|e| e.to_string())? != *bytes {
+                        return Err("An image filename conflicts with an existing file".to_owned());
+                    }
+                } else {
+                    #[cfg(windows)]
+                    fs.write_new_atomic(&path, bytes).map_err(|e| e.to_string())?;
+                    #[cfg(not(windows))]
+                    {
+                        use std::io::Write;
+                        fs.create_new(&path, false).and_then(|mut file| file.write_all(bytes)).map_err(|e| e.to_string())?;
+                    }
+                    written.push(path);
+                }
+            }
+            create_note_in(&root, &mut ix, &name, &capture.markdown)
+        })();
+        if let Err(error) = save {
+            for path in written { let _ = fs.unlink(&path); }
+            return Err(error);
+        }
+        for file in capture.assets.keys() { ix.add_image(&opensidian_lib::vault_path_string(&folder.join(file))); }
+        Ok((name, capture.omitted))
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -6476,10 +6588,22 @@ fn main() {
         }
     }
     migrate::run_home(&home_path());
-    let arg_vault = argv_vault(&args, env_vault.is_some());
-    let init = env_vault
-        .or(arg_vault)
-        .or_else(|| read_cfg().0.map(PathBuf::from).filter(|p| p.is_dir()));
+    let package_arg = if env_vault.is_none() && switched.is_none() {
+        argv_pick(&args).0.map(PathBuf::from).filter(|p| portable::is_package(p))
+    } else { None };
+    let package = package_arg.as_deref().and_then(|path| match portable::unpack(path) {
+        Ok(session) => Some(session),
+        Err(error) => {
+            if let Ok(mut notice) = BOOT_NOTICE.lock() { *notice = Some(format!("Could not open portable package. {error}")); }
+            None
+        }
+    });
+    let init = if package_arg.is_some() {
+        package.as_ref().map(|session| session.directory.clone())
+    } else {
+        let arg_vault = argv_vault(&args, env_vault.is_some());
+        env_vault.or(arg_vault).or_else(|| read_cfg().0.map(PathBuf::from).filter(|p| p.is_dir()))
+    };
     // R18.1: open the telemetry sink BEFORE the sandbox closes. Landlock filters
     // path lookups, not open descriptors, and OPENSIDIAN_OTEL routinely names a
     // file outside the write roots (the gate's $OUT). Opening it after enforce()
@@ -6566,6 +6690,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(appid::plugin())
         .manage(vault)
+        .manage(PackageState(package))
         .manage(ZoomLevel(Mutex::new(read_zoom_cfg())))
         .setup(move |app| {
             if let Some(wc) = &page_conf {
@@ -6732,6 +6857,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_notes, list_images, canvas_io, canvas_attach, paste_image, read_note, write_note, create_note, render, render_blocks, block_lines, render_view, highlight_blocks, graph, graph_local, graph_view, vault_get, pick_vault,
             note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
+            preview_package, export_package, package_session, open_package, open_package_pdf,
+            capture_web,
             create_vault, create_vault_dir, open_vault_window, switch_show, switch_ready, boot_notice, home_dir, list_dirs, list_folders, create_dir, backlinks, search,
             list_bookmarks, toggle_bookmark, bookmark_rows, bm_group_new, bm_group_rename, bm_group_delete, bm_move, bm_add, bm_drag, bm_add_at, recent_vaults, rename_note, media_rename, media_read, move_note, update_links, delete_note, link_consent, set_link_consent, strict_line_breaks, set_strict_line_breaks, qs_new_name, readable_line_length, graph_settings, set_graph_settings, tags, tag_counts,
             get_sidebar_w, set_sidebar_w, log_spans, graph_renderer_pref, type_probe, nob_probe, psg_probe, vb_probe, smoke_css,
@@ -6766,8 +6893,13 @@ fn main() {
             secrets::secrets_op,
             settings::settings_model
         ])
-        .run(ctx)
-        .expect("tauri run");
+        .build(ctx)
+        .expect("tauri build")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(session) = &app.state::<PackageState>().0 { session.cleanup(); }
+            }
+        });
 }
 
 #[cfg(all(test, target_os = "linux"))]

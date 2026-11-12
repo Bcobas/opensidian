@@ -216,3 +216,154 @@ async function toolNoteTable() {
     render();
   } catch (error) { status(errStr(error)); }
 }
+
+async function toolPortableExport(name) {
+  if (!name) return;
+  const { dialog, body, status } = toolDialog("Export note with its files");
+  const chosen = new Set();
+  let request = 0, reviewed = null;
+  const linked = toolNode("fieldset");
+  const files = toolNode("div");
+  const warnings = toolNode("div");
+  const save = toolButton("Export ZIP", async () => {
+    if (!reviewed) return;
+    save.disabled = linked.disabled = true;
+    try {
+      const path = await inv("export_package", { name, selected: [...chosen], token: reviewed.token });
+      status("Saved " + path);
+      const full = vaultPath.replace(/[\\/]$/, "") + "/" + path;
+      body.append(toolButton("Open exported package", async () => {
+        try { await inv("open_package", { path: full }); dialog.close(); }
+        catch (error) { status(errStr(error)); }
+      }));
+    } catch (error) {
+      await refresh();
+      status(errStr(error));
+    }
+  });
+  function showList(container, title, items) {
+    const list = toolNode("ul");
+    for (const item of items) list.append(toolNode("li", item));
+    container.replaceChildren(toolNode("h3", title), list);
+    container.hidden = !items.length;
+  }
+  async function refresh() {
+    const id = ++request;
+    save.disabled = true;
+    reviewed = null;
+    status("Checking references…");
+    try {
+      const result = await inv("preview_package", { name, selected: [...chosen] });
+      if (id !== request) return;
+      linked.replaceChildren(toolNode("legend", "Include linked notes"));
+      const options = [...new Set([...result.linked, ...chosen])].sort();
+      for (const note of options) {
+        const label = toolNode("label");
+        const input = toolNode("input");
+        input.type = "checkbox";
+        input.checked = chosen.has(note);
+        input.onchange = () => {
+          if (input.checked) chosen.add(note);
+          else chosen.delete(note);
+          void refresh();
+        };
+        label.append(input, document.createTextNode(" " + note));
+        linked.append(label);
+      }
+      linked.hidden = !options.length;
+      showList(files, "Files in the ZIP", result.files);
+      showList(warnings, "References that will stay unresolved", result.omitted);
+      reviewed = result;
+      save.disabled = linked.disabled = false;
+      status("");
+    } catch (error) {
+      if (id === request) { linked.disabled = false; status(errStr(error)); }
+    }
+  }
+  save.disabled = true;
+  body.append(linked, files, warnings, save);
+  try { await toolFlush(); await refresh(); }
+  catch (error) { status(errStr(error)); }
+}
+
+function toolOpenPackage() {
+  const { dialog, body, status } = toolDialog("Open portable package");
+  const form = toolNode("form");
+  const label = toolNode("label", "Full path to the .opensidian.zip file");
+  const input = toolNode("input");
+  input.required = true;
+  label.append(input);
+  const open = toolNode("button", "Open package");
+  form.append(label, open);
+  body.append(form);
+  form.onsubmit = async event => {
+    event.preventDefault();
+    open.disabled = true;
+    try { await inv("open_package", { path: input.value }); dialog.close(); }
+    catch (error) { status(errStr(error)); open.disabled = false; }
+  };
+}
+
+async function toolPackageLink(path) {
+  if (!packageInfo || !path.startsWith("attachments/")) return false;
+  if (/\.pdf$/i.test(path)) {
+    try { await inv("open_package_pdf", { path }); }
+    catch (error) { say(errStr(error)); }
+  } else {
+    say("Extract the package to open " + path);
+  }
+  return true;
+}
+
+function toolWebCapture() {
+  const { dialog, body, status } = toolDialog("Capture web content");
+  const form = toolNode("form");
+  const field = (name, type) => {
+    const label = toolNode("label", name);
+    const input = toolNode("input");
+    input.type = type;
+    input.required = true;
+    label.append(input);
+    form.append(label);
+    return input;
+  };
+  const url = field("Source URL", "url");
+  const title = field("Note title", "text");
+  const excerptLabel = toolNode("label", "Paste a selection, or leave blank to capture the page");
+  const excerpt = toolNode("textarea");
+  excerpt.rows = 6;
+  excerptLabel.append(excerpt);
+  let pasted = null;
+  excerpt.onpaste = event => {
+    const html = event.clipboardData?.getData("text/html");
+    if (!html || excerpt.value) return;
+    event.preventDefault();
+    pasted = html;
+    excerpt.value = event.clipboardData.getData("text/plain") || "[Formatted selection]";
+  };
+  excerpt.oninput = () => { pasted = null; };
+  const imageLabel = toolNode("label");
+  const images = toolNode("input");
+  images.type = "checkbox";
+  imageLabel.append(images, document.createTextNode(" Save images with the note"));
+  const submit = toolNode("button", "Save capture");
+  form.append(excerptLabel, imageLabel, submit);
+  body.append(form);
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    submit.disabled = true;
+    status("Capturing content…");
+    const escape = value => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    const text = excerpt.value.trim();
+    const fragment = pasted || (text ? text.split(/\n\s*\n/).map(part => `<p>${escape(part).replaceAll("\n", "<br>")}</p>`).join("") : null);
+    try {
+      const [name, omitted] = await inv("capture_web", { title: title.value, url: url.value, fragment, images: images.checked });
+      await afterWrite(name);
+      dialog.close();
+      await openInTab(name);
+      if (omitted) say(`${omitted} images could not be included.`);
+    } catch (error) { status(errStr(error)); }
+    finally { submit.disabled = false; }
+  };
+}
