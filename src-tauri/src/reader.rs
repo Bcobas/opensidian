@@ -12,7 +12,7 @@ use hayro::hayro_syntax::Pdf;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
 
-use crate::{index::MAX_NOTE_BYTES, nav_allowed, ocr, pdf, pdf_text, vaultfs};
+use crate::{index::MAX_NOTE_BYTES, nav_allowed, ocr, pdf, pdf_text, portable, vaultfs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -207,6 +207,15 @@ impl OpenedDocument {
         Err(io::Error::new(io::ErrorKind::AlreadyExists, "no available name for the Markdown copy"))
     }
 
+    fn package(&self, text: &str, selected: &[String]) -> Result<portable::Package, String> {
+        if self.kind != Kind::Markdown { return Err("Open a Markdown document to export a package".to_owned()); }
+        portable::plan_document(&self.directory, &self.name, selected, |path| {
+            if path == self.name { return Ok(text.to_owned()); }
+            self.directory.open_read(path).and_then(Snapshot::read)
+                .map(|snapshot| snapshot.text).map_err(|error| error.to_string())
+        })
+    }
+
     fn image(&self, target: &str) -> Option<(&'static str, Vec<u8>)> {
         let relative = relative_path(target)?;
         let mime = image_mime(&relative)?;
@@ -328,6 +337,37 @@ fn export_reader_markdown(reader: State<'_, Reader>, text: String) -> Result<Str
 }
 
 #[tauri::command]
+async fn preview_reader_package(app: tauri::AppHandle, text: String, selected: Vec<String>) -> Result<portable::Preview, String> {
+    check_size(text.len()).map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<Reader>().with_file(|doc| Ok(doc.package(&text, &selected)?.preview))
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn export_reader_package(
+    app: tauri::AppHandle, text: String, selected: Vec<String>, token: String,
+) -> Result<String, String> {
+    check_size(text.len()).map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<Reader>().with_file(|doc| portable::export(&doc.directory, doc.package(&text, &selected)?, &token))
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn open_reader_package(reader: State<'_, Reader>, filename: String) -> Result<(), String> {
+    let name = Path::new(&filename);
+    if name.file_name() != Some(std::ffi::OsStr::new(&filename)) || !portable::is_package(name) {
+        return Err("Invalid package filename".to_owned());
+    }
+    let path = reader.with_file(|doc| {
+        if !doc.directory.is_file(name) { return Err("Package is missing from the document folder".to_owned()); }
+        Ok(doc.parent.join(name))
+    })?;
+    portable::launch(&path)
+}
+
+#[tauri::command]
 fn reload_reader_document(reader: State<'_, Reader>) -> Result<String, String> {
     reader.with_file(|doc| {
         let Content::Text(snapshot) = &mut doc.content else { return Err("Expected a text document".to_owned()) };
@@ -413,6 +453,7 @@ pub fn run(path: &Path, mut context: tauri::Context<Wry>, initial_page: usize) {
         })
         .invoke_handler(tauri::generate_handler![
             standalone_document, convert_reader_pdf, preview_reader_markdown, save_reader_markdown, export_reader_markdown,
+            preview_reader_package, export_reader_package, open_reader_package,
             reload_reader_document, open_reader_link, open_reader_document, close_reader
         ])
         .run(context)
@@ -509,6 +550,53 @@ mod tests {
         assert!(doc.image("%2e%2e/outside.png").is_none());
         assert_eq!(doc.linked_document("docs/Anexo").unwrap(), doc.parent.join("docs/Anexo.md"));
         assert!(doc.linked_document("../Other").is_none());
+    }
+
+    #[test]
+    fn packages_a_standalone_markdown_draft_and_only_its_reviewed_files() {
+        let root = Fixture::new();
+        let shared = root.0.join("To share");
+        fs::create_dir_all(shared.join("docs")).unwrap();
+        fs::create_dir(shared.join("images")).unwrap();
+        fs::create_dir(shared.join(".obsidian")).unwrap();
+        let path = shared.join("Guía.MARKDOWN");
+        fs::write(&path, "# Original\n").unwrap();
+        fs::write(shared.join("Guía.opensidian.zip"), b"Existing package").unwrap();
+        fs::write(root.0.join("Outside.png"), b"outside").unwrap();
+        fs::write(shared.join(".obsidian/private.png"), b"hidden").unwrap();
+        fs::write(shared.join("images/foto uno.png"), b"image").unwrap();
+        fs::write(shared.join("docs/Manual.pdf"), include_bytes!("../tests/fixtures/reader/selectable.pdf")).unwrap();
+        let appendix: Vec<u8> = [0xff, 0xfe].into_iter().chain(
+            "# Café\r\n\r\n[Manual](Manual.pdf#page=2)\r\n".encode_utf16().flat_map(u16::to_le_bytes)
+        ).collect();
+        fs::write(shared.join("docs/Anexo.markdown"), &appendix).unwrap();
+        let draft = "# Borrador\n\n![Foto](images/foto%20uno.png)\n\n[[docs/Anexo|Anexo]]\n\n![Fuera](../Outside.png)\n\n![Privada](.obsidian/private.png)\n";
+        let doc = OpenedDocument::open(&path).unwrap();
+
+        let preview = doc.package(draft, &[]).unwrap().preview;
+        assert_eq!(preview.files, ["Guía.MARKDOWN", "images/foto uno.png"]);
+        assert_eq!(preview.linked, ["docs/Anexo.markdown"]);
+        assert_eq!(preview.omitted, ["../Outside.png", ".obsidian/private.png", "docs/Anexo.markdown"]);
+        assert!(doc.package(draft, &["../Outside.md".to_owned()]).is_err());
+        let selected = ["docs/Anexo.markdown".to_owned()];
+        let package = doc.package(draft, &selected).unwrap();
+        assert!(portable::export(&doc.directory, package, &preview.token).is_err());
+        let package = doc.package(draft, &selected).unwrap();
+        let token = package.preview.token.clone();
+        let name = portable::export(&doc.directory, package, &token).unwrap();
+        assert_eq!(name, "Guía (2).opensidian.zip");
+        let session = portable::unpack(&shared.join(name)).unwrap();
+        assert_eq!(session.entry, "Guía");
+        let note = fs::read_to_string(session.directory.join("Guía.md")).unwrap();
+        assert!(note.starts_with("# Borrador\n"));
+        assert!(note.contains("![Foto](attachments/foto%20uno.png)"));
+        assert!(note.contains("[Anexo](Anexo.md)"));
+        assert_eq!(fs::read_to_string(session.directory.join("Anexo.md")).unwrap(), "# Café\n\n[Manual](attachments/Manual.pdf#page=2)\n");
+        assert!(!session.directory.join("attachments/Outside.png").exists());
+        assert!(!session.directory.join("attachments/private.png").exists());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Original\n");
+        assert_eq!(fs::read(shared.join("docs/Anexo.markdown")).unwrap(), appendix);
+        assert_eq!(fs::read(shared.join("Guía.opensidian.zip")).unwrap(), b"Existing package");
     }
 
     #[test]

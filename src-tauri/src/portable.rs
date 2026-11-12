@@ -33,6 +33,7 @@ pub struct Preview {
 pub struct Package {
     pub preview: Preview,
     entry: String,
+    source: PathBuf,
     notes: BTreeMap<PathBuf, Note>,
     files: BTreeMap<PathBuf, String>,
 }
@@ -73,9 +74,11 @@ fn resolve(fs: &Vault, catalog: &[String], source: &Path, name: &str, wiki: bool
         let direct = relative(source, name);
         for path in direct.into_iter().chain(safe_rel(name)) {
             if fs.is_file(&path) { return Some(path); }
-            if wiki && !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md")) {
-                let md = path.with_file_name(format!("{}.md", path.file_name()?.to_string_lossy()));
-                if fs.is_file(&md) { return Some(md); }
+            if wiki && !note_file(&path) {
+                for extension in ["md", "markdown"] {
+                    let note = path.with_file_name(format!("{}.{extension}", path.file_name()?.to_string_lossy()));
+                    if fs.is_file(&note) { return Some(note); }
+                }
             }
         }
         if name.contains(['\\', ':']) || name.split('/').any(|s| s.starts_with('.')) { continue; }
@@ -156,31 +159,59 @@ fn references(fs: &Vault, catalog: &[String], source: &Path, text: &str) -> Vec<
 }
 
 fn note_file(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
 }
 
 fn reserve_name(path: &Path, used: &mut BTreeSet<String>) -> String {
-    let filename = path.file_name().expect("relative file").to_string_lossy();
     let stem = path.file_stem().expect("file stem").to_string_lossy();
-    let extension = path.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
-    let folder = if note_file(path) { "" } else { "attachments/" };
+    let (stem, extension, folder) = if note_file(path) {
+        let stem = stem.trim_start_matches('.');
+        let valid = !stem.is_empty() && crate::vaultfs::valid_component(std::ffi::OsStr::new(&format!("{stem}.md")));
+        (if valid { stem } else { "Note" }, ".md".to_owned(), "")
+    } else {
+        let extension = path.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
+        (stem.as_ref(), extension, "attachments/")
+    };
     for counter in 1.. {
-        let name = if counter == 1 { format!("{folder}{filename}") } else { format!("{folder}{stem} ({counter}){extension}") };
+        let name = if counter == 1 { format!("{folder}{stem}{extension}") } else { format!("{folder}{stem} ({counter}){extension}") };
         if used.insert(name.to_lowercase()) { return name; }
     }
     unreachable!()
 }
 
 pub fn plan(fs: &Vault, mut catalog: Vec<String>, entry: &str, selected: &[String]) -> Result<Package, String> {
-    if selected.len() >= MAX_FILES { return Err("Too many selected notes".to_owned()); }
     let entry = crate::note_rel(entry).ok_or("Invalid note name")?;
     catalog.sort_unstable();
     catalog.dedup();
+    plan_entries(fs, Some(&catalog), entry, selected, |path| {
+        String::from_utf8(fs.p_read(path, MAX_NOTE_BYTES).map_err(fail)?).map_err(fail)
+    })
+}
+
+#[cfg(windows)]
+pub fn plan_document(
+    fs: &Vault, entry: &Path, selected: &[String], read: impl Fn(&Path) -> Result<String, String>,
+) -> Result<Package, String> {
+    if !note_file(entry) || entry.components().count() != 1 || !entry.file_name().is_some_and(crate::vaultfs::valid_component) {
+        return Err("Invalid Markdown document".to_owned());
+    }
+    // A standalone document has no vault-wide index. Resolve explicit paths only.
+    plan_entries(fs, None, entry.to_owned(), selected, read)
+}
+
+fn plan_entries(
+    fs: &Vault, catalog: Option<&[String]>, entry: PathBuf, selected: &[String],
+    read: impl Fn(&Path) -> Result<String, String>,
+) -> Result<Package, String> {
+    if selected.len() >= MAX_FILES { return Err("Too many selected notes".to_owned()); }
     let mut notes = BTreeMap::new();
     let mut chosen = BTreeSet::from([entry.clone()]);
     for name in selected {
         let path = safe_rel(name).filter(|path| note_file(path)).ok_or("Invalid linked note")?;
-        if catalog.binary_search(&opensidian_lib::vault_path_string(&path)).is_err() { return Err("Linked note no longer exists".to_owned()); }
+        let known = catalog.map_or_else(|| fs.is_file(&path), |catalog| {
+            catalog.binary_search(&opensidian_lib::vault_path_string(&path)).is_ok()
+        });
+        if !known { return Err("Linked note no longer exists".to_owned()); }
         chosen.insert(path);
     }
 
@@ -190,10 +221,11 @@ pub fn plan(fs: &Vault, mut catalog: Vec<String>, entry: &str, selected: &[Strin
     let mut fingerprint = Sha256::new();
     let mut size = 0;
     for path in &chosen {
-        let text = String::from_utf8(fs.p_read(path, MAX_NOTE_BYTES).map_err(fail)?).map_err(fail)?;
+        let text = read(path)?;
+        if text.len() as u64 > MAX_NOTE_BYTES { return Err("A Markdown document exceeds the size limit".to_owned()); }
         size += text.len() as u64;
         if size > MAX_PACKAGE { return Err("Package exceeds 256 MiB".to_owned()); }
-        let refs = references(fs, &catalog, path, &text);
+        let refs = references(fs, catalog.unwrap_or_default(), path, &text);
         for reference in &refs {
             match reference.target.as_deref() {
                 Some(target) if note_file(target) => {
@@ -211,11 +243,14 @@ pub fn plan(fs: &Vault, mut catalog: Vec<String>, entry: &str, selected: &[Strin
     let mut used = BTreeSet::new();
     let files = files.into_iter().map(|path| {
         let name = reserve_name(&path, &mut used);
-        let stat = fs.p_stat(&path).map_err(fail)?;
-        if !note_file(&path) { size += stat.size; }
         fingerprint.update(opensidian_lib::vault_path_string(&path));
-        fingerprint.update(stat.size.to_le_bytes());
-        fingerprint.update(stat.mtime_ms.to_le_bytes());
+        fingerprint.update(b"\0");
+        if !note_file(&path) {
+            let stat = fs.p_stat(&path).map_err(fail)?;
+            size += stat.size;
+            fingerprint.update(stat.size.to_le_bytes());
+            fingerprint.update(stat.mtime_ms.to_le_bytes());
+        }
         Ok((path, name))
     }).collect::<Result<BTreeMap<_, _>, String>>()?;
     if size > MAX_PACKAGE { return Err("Package exceeds 256 MiB".to_owned()); }
@@ -224,7 +259,7 @@ pub fn plan(fs: &Vault, mut catalog: Vec<String>, entry: &str, selected: &[Strin
         linked: linked.into_iter().collect(), omitted: omitted.into_iter().collect(),
         token: format!("{:x}", fingerprint.finalize()),
     };
-    Ok(Package { entry: files[&entry].clone(), preview, notes, files })
+    Ok(Package { entry: files[&entry].clone(), source: entry, preview, notes, files })
 }
 
 fn splice(text: &str, range: Range<usize>, edits: &[(Range<usize>, String)]) -> String {
@@ -263,7 +298,7 @@ fn rewrite(note: &Note, files: &BTreeMap<PathBuf, String>) -> String {
     splice(&note.text, 0..note.text.len(), &edits)
 }
 
-pub fn export(fs: &Vault, name: &str, package: Package, expected: &str) -> Result<String, String> {
+pub fn export(fs: &Vault, package: Package, expected: &str) -> Result<String, String> {
     if expected != package.preview.token { return Err("The package contents changed. Review the files again before exporting.".to_owned()); }
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -282,7 +317,7 @@ pub fn export(fs: &Vault, name: &str, package: Package, expected: &str) -> Resul
     }
     let data = zip.finish().map_err(fail)?.into_inner();
     if data.len() as u64 > MAX_PACKAGE { return Err("ZIP file exceeds 256 MiB".to_owned()); }
-    let note = crate::note_rel(name).ok_or("Invalid note name")?;
+    let note = package.source;
     let stem = note.file_stem().ok_or("Invalid note name")?.to_string_lossy();
     for counter in 1..=10_000 {
         let suffix = if counter == 1 { String::new() } else { format!(" ({counter})") };
@@ -324,6 +359,11 @@ pub fn is_package(path: &Path) -> bool {
     path.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.to_ascii_lowercase().ends_with(".opensidian.zip"))
 }
 
+pub fn launch(path: &Path) -> Result<(), String> {
+    std::process::Command::new(std::env::current_exe().map_err(fail)?)
+        .arg(path).env_remove("VAULT_DIR").spawn().map(drop).map_err(fail)
+}
+
 pub fn unpack(path: &Path) -> Result<Session, String> {
     let file = std::fs::File::open(path).map_err(fail)?;
     if file.metadata().map_err(fail)?.len() > MAX_PACKAGE { return Err("Package exceeds 256 MiB".to_owned()); }
@@ -333,7 +373,8 @@ pub fn unpack(path: &Path) -> Result<Session, String> {
     zip.by_name(MANIFEST).map_err(|_| "This ZIP is not an Opensidian package")?.take(65537).read_to_end(&mut data).map_err(fail)?;
     if data.len() > 65536 { return Err("Package manifest is too large".to_owned()); }
     let manifest: Manifest = serde_json::from_slice(&data).map_err(fail)?;
-    let entry = safe_rel(&manifest.entry).filter(|path| path.components().count() == 1 && note_file(path))
+    let archive_note = |path: &Path| path.components().count() == 1 && path.extension().is_some_and(|ext| ext == "md");
+    let entry = safe_rel(&manifest.entry).filter(|path| archive_note(path))
         .ok_or("Invalid package entry note")?;
     if manifest.version != 1 { return Err("Unsupported package version".to_owned()); }
     let title = path.file_name().ok_or("Invalid package filename")?.to_string_lossy().into_owned();
@@ -348,7 +389,7 @@ pub fn unpack(path: &Path) -> Result<Session, String> {
         if file.name() == MANIFEST { continue; }
         let raw = file.name();
         let safe = safe_rel(raw).filter(|path| opensidian_lib::vault_path_string(path) == raw)
-            .filter(|path| (path.components().count() == 1 && note_file(path))
+            .filter(|path| archive_note(path)
                 || (path.components().count() == 2 && path.starts_with("attachments")))
             .ok_or("Unexpected path in the package")?;
         if !used.insert(raw.to_lowercase()) || file.is_dir() || file.is_symlink() { return Err("Unexpected file in the package".to_owned()); }
@@ -392,9 +433,9 @@ mod tests {
         assert_eq!(package.preview.omitted, ["Private.md"]);
         assert_eq!(package.preview.files, ["Other.md", "folder/Main.md", "media/document.pdf", "media/image one.png"]);
         let token = package.preview.token.clone();
-        assert!(export(&fs, "folder/Main", package, "stale").is_err());
+        assert!(export(&fs, package, "stale").is_err());
         let package = plan(&fs, catalog, "folder/Main", &selected).unwrap();
-        let archive = export(&fs, "folder/Main", package, &token).unwrap();
+        let archive = export(&fs, package, &token).unwrap();
         let opened = unpack(&original.directory.join(archive)).unwrap();
         assert_eq!(opened.entry, "Main");
         let text = std::fs::read_to_string(opened.directory.join("Main.md")).unwrap();

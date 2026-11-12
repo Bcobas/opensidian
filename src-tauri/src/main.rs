@@ -1199,7 +1199,7 @@ async fn export_package(v: State<'_, Vault>, name: String, selected: Vec<String>
     tauri::async_runtime::spawn_blocking(move || {
         let fs = vaultfs::Vault::open(&root).map_err(|e| e.to_string())?;
         let package = portable::plan(&fs, catalog, &name, &selected)?;
-        portable::export(&fs, &name, package, &token)
+        portable::export(&fs, package, &token)
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -1219,8 +1219,7 @@ fn open_package(path: String) -> Result<(), String> {
     if !path.is_absolute() || !portable::is_package(&path) || !path.is_file() {
         return Err("Choose an existing .opensidian.zip file using its full path.".to_owned());
     }
-    std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
-        .arg(path).env_remove("VAULT_DIR").spawn().map(drop).map_err(|e| e.to_string())
+    portable::launch(&path)
 }
 
 #[tauri::command]

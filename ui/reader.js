@@ -10,6 +10,7 @@ const convert = $("reader-convert");
 const edit = $("reader-edit");
 const view = $("reader-preview");
 const save = $("reader-save");
+const pack = $("reader-package");
 const copy = $("reader-copy");
 const reload = $("reader-reload");
 const statusLine = $("reader-status");
@@ -49,6 +50,8 @@ function updateActions() {
   view.setAttribute("aria-pressed", String(!editing));
   save.textContent = copyOnly ? "Save as Markdown" : "Save";
   save.disabled = busy || conflict || (copyOnly ? source.value === exportedText : !dirty());
+  pack.hidden = copyOnly;
+  pack.disabled = busy;
   copy.hidden = reload.hidden = !conflict;
   copy.disabled = reload.disabled = busy;
   edit.disabled = view.disabled = busy;
@@ -204,6 +207,15 @@ pageImage.onerror = () => {
 edit.onclick = () => showMode(true);
 view.onclick = () => showMode(false);
 save.onclick = saveDocument;
+pack.onclick = () => {
+  const text = source.value;
+  return portableExportDialog({
+    description: dirty() ? "The ZIP will include the current draft. Save separately to update the original." : null,
+    inspect: selected => invoke("preview_reader_package", { text, selected }),
+    write: (selected, token) => invoke("export_reader_package", { text, selected, token }),
+    open: filename => invoke("open_reader_package", { filename }),
+  });
+};
 copy.onclick = saveCopy;
 reload.onclick = () => perform(async () => {
   const text = await invoke("reload_reader_document");

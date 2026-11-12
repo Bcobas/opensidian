@@ -1,36 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-function toolNode(tag, text) {
-  const node = document.createElement(tag);
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function toolDialog(title) {
-  const dialog = toolNode("dialog");
-  dialog.className = "note-tool";
-  dialog.setAttribute("aria-label", title);
-  const header = toolNode("header");
-  const close = toolButton("Close", () => dialog.close());
-  header.append(toolNode("h2", title), close);
-  const status = toolNode("p");
-  status.setAttribute("role", "status");
-  status.hidden = true;
-  const body = toolNode("section");
-  dialog.append(header, status, body);
-  dialog.addEventListener("close", () => dialog.remove(), { once: true });
-  document.body.append(dialog);
-  dialog.showModal();
-  return { dialog, body, status(message) { status.textContent = message || ""; status.hidden = !message; } };
-}
-
-function toolButton(label, action) {
-  const button = toolNode("button", label);
-  button.type = "button";
-  button.onclick = action;
-  return button;
-}
-
 function toolSelect(label, entries) {
   const select = toolNode("select");
   select.setAttribute("aria-label", label);
@@ -217,73 +186,14 @@ async function toolNoteTable() {
   } catch (error) { status(errStr(error)); }
 }
 
-async function toolPortableExport(name) {
+function toolPortableExport(name) {
   if (!name) return;
-  const { dialog, body, status } = toolDialog("Export note with its files");
-  const chosen = new Set();
-  let request = 0, reviewed = null;
-  const linked = toolNode("fieldset");
-  const files = toolNode("div");
-  const warnings = toolNode("div");
-  const save = toolButton("Export ZIP", async () => {
-    if (!reviewed) return;
-    save.disabled = linked.disabled = true;
-    try {
-      const path = await inv("export_package", { name, selected: [...chosen], token: reviewed.token });
-      status("Saved " + path);
-      const full = vaultPath.replace(/[\\/]$/, "") + "/" + path;
-      body.append(toolButton("Open exported package", async () => {
-        try { await inv("open_package", { path: full }); dialog.close(); }
-        catch (error) { status(errStr(error)); }
-      }));
-    } catch (error) {
-      await refresh();
-      status(errStr(error));
-    }
+  return portableExportDialog({
+    prepare: toolFlush,
+    inspect: selected => inv("preview_package", { name, selected }),
+    write: (selected, token) => inv("export_package", { name, selected, token }),
+    open: path => inv("open_package", { path: vaultPath.replace(/[\\/]$/, "") + "/" + path }),
   });
-  function showList(container, title, items) {
-    const list = toolNode("ul");
-    for (const item of items) list.append(toolNode("li", item));
-    container.replaceChildren(toolNode("h3", title), list);
-    container.hidden = !items.length;
-  }
-  async function refresh() {
-    const id = ++request;
-    save.disabled = true;
-    reviewed = null;
-    status("Checking references…");
-    try {
-      const result = await inv("preview_package", { name, selected: [...chosen] });
-      if (id !== request) return;
-      linked.replaceChildren(toolNode("legend", "Include linked notes"));
-      const options = [...new Set([...result.linked, ...chosen])].sort();
-      for (const note of options) {
-        const label = toolNode("label");
-        const input = toolNode("input");
-        input.type = "checkbox";
-        input.checked = chosen.has(note);
-        input.onchange = () => {
-          if (input.checked) chosen.add(note);
-          else chosen.delete(note);
-          void refresh();
-        };
-        label.append(input, document.createTextNode(" " + note));
-        linked.append(label);
-      }
-      linked.hidden = !options.length;
-      showList(files, "Files in the ZIP", result.files);
-      showList(warnings, "References that will stay unresolved", result.omitted);
-      reviewed = result;
-      save.disabled = linked.disabled = false;
-      status("");
-    } catch (error) {
-      if (id === request) { linked.disabled = false; status(errStr(error)); }
-    }
-  }
-  save.disabled = true;
-  body.append(linked, files, warnings, save);
-  try { await toolFlush(); await refresh(); }
-  catch (error) { status(errStr(error)); }
 }
 
 function toolOpenPackage() {
