@@ -45,6 +45,16 @@ jobs:
       - name: Test standalone editing and document conversion
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian reader::tests
+      - name: Test OCR on a scanned PDF
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          choco install tesseract --version=5.5.3.20260724 --yes --no-progress
+          if ($LASTEXITCODE -notin @(0, 1641, 3010)) { throw "Tesseract install exited with $LASTEXITCODE" }
+          $engine = Join-Path $env:ProgramFiles 'Tesseract-OCR\tesseract.exe'
+          if (!(Test-Path -LiteralPath $engine)) { throw 'Tesseract executable not found' }
+          $env:OPENSIDIAN_TESSERACT = $engine
+          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian reader::tests::scanned_pdf_ocr -- --ignored
       - name: Build NSIS installer
         run: cargo tauri build --ci --target x86_64-pc-windows-msvc -- --locked
       - name: Upload installer

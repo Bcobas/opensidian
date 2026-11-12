@@ -12,7 +12,7 @@ use hayro::hayro_syntax::Pdf;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
 
-use crate::{index::MAX_NOTE_BYTES, nav_allowed, pdf, pdf_text, vaultfs};
+use crate::{index::MAX_NOTE_BYTES, nav_allowed, ocr, pdf, pdf_text, vaultfs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -187,9 +187,9 @@ impl OpenedDocument {
         pdf::page_png(pdf, page, width)
     }
 
-    fn convert_pdf(&self, selection: &str) -> Result<pdf_text::Conversion, String> {
+    fn convert_pdf(&self, selection: &str, ocr_language: Option<ocr::Language>) -> Result<pdf_text::Conversion, String> {
         let Content::Pdf(pdf) = &self.content else { return Err("Expected a PDF document".to_owned()) };
-        pdf_text::convert(pdf, selection)
+        pdf_text::convert(pdf, selection, ocr_language)
     }
 
     fn export(&self, text: &str) -> io::Result<String> {
@@ -299,9 +299,11 @@ fn standalone_document(reader: State<'_, Reader>) -> Result<DocumentView, String
 }
 
 #[tauri::command]
-async fn convert_reader_pdf(app: tauri::AppHandle, selection: String) -> Result<pdf_text::Conversion, String> {
+async fn convert_reader_pdf(
+    app: tauri::AppHandle, selection: String, ocr_language: Option<ocr::Language>,
+) -> Result<pdf_text::Conversion, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<Reader>().with_file(|doc| doc.convert_pdf(&selection))
+        app.state::<Reader>().with_file(|doc| doc.convert_pdf(&selection, ocr_language))
     }).await.map_err(|error| error.to_string())?
 }
 
@@ -533,15 +535,19 @@ mod tests {
         assert!(doc.pdf_page(3, 240).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(doc.pdf_page(4, 240).is_none());
 
-        let converted = doc.convert_pdf("3, 2-3").unwrap();
+        let converted = doc.convert_pdf("3, 2-3", None).unwrap();
         assert_eq!(converted.omitted, vec![2]);
+        assert!(converted.recognized.is_empty());
         assert_eq!(converted.text, "## Page 3\n\ncafé PDF\nLine two\n");
-        let all = doc.convert_pdf("").unwrap();
+        let digital = doc.convert_pdf("3", Some(ocr::Language::Spanish)).unwrap();
+        assert_eq!(digital.text, converted.text);
+        assert!(digital.recognized.is_empty());
+        let all = doc.convert_pdf("", None).unwrap();
         assert!(all.text.starts_with("## Page 1\n\nFirst page\n"));
         assert_eq!(all.omitted, vec![2]);
-        assert!(doc.convert_pdf("2").unwrap_err().contains("OCR"));
+        assert!(doc.convert_pdf("2", None).unwrap_err().contains("OCR"));
         for invalid in ["0", "4", "3-1", "1,", "2-3-4", "+1"] {
-            assert!(doc.convert_pdf(invalid).is_err(), "{invalid}");
+            assert!(doc.convert_pdf(invalid, None).is_err(), "{invalid}");
         }
 
         let edited = format!("{}\nMy note\n", converted.text);
@@ -550,6 +556,27 @@ mod tests {
         assert_eq!(exported, "Lectura de café (2).md");
         assert_eq!(fs::read_to_string(root.0.join(exported)).unwrap(), edited);
         assert_eq!(fs::read_to_string(root.0.join("Lectura de café.md")).unwrap(), "Keep this note");
+        assert_eq!(fs::read(&path).unwrap().as_slice(), original);
+    }
+
+    #[test]
+    #[ignore = "requires Tesseract with English language data"]
+    fn scanned_pdf_ocr_recognizes_image_text_and_exports_markdown() {
+        let root = Fixture::new();
+        let path = root.0.join("Scanned notes.pdf");
+        let original = include_bytes!("../tests/fixtures/reader/scanned.pdf");
+        fs::write(&path, original).unwrap();
+        let doc = OpenedDocument::open(&path).unwrap();
+        assert!(doc.convert_pdf("1", None).unwrap_err().contains("No selectable text"));
+        let converted = doc.convert_pdf("1", Some(ocr::Language::English)).unwrap();
+        assert_eq!(converted.recognized, vec![1]);
+        assert!(converted.omitted.is_empty());
+        assert!(converted.text.starts_with("## Page 1\n\n"), "{:?}", converted.text);
+        let normalized = converted.text.to_ascii_lowercase();
+        assert!(normalized.contains("scanned notes"), "{:?}", converted.text);
+        assert!(normalized.contains("local ocr test"), "{:?}", converted.text);
+        assert_eq!(doc.export(&converted.text).unwrap(), "Scanned notes.md");
+        assert_eq!(fs::read_to_string(root.0.join("Scanned notes.md")).unwrap(), converted.text);
         assert_eq!(fs::read(&path).unwrap().as_slice(), original);
     }
 }

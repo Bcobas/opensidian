@@ -758,7 +758,8 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
   background: var(--bg-sidebar);
 }
 .reader-pdf-page img { width: 100%; max-width: 800px; height: auto }
-.standalone-reader input {
+#reader-ocr-options:not([hidden]) { display: flex; align-items: center; gap: 0.4rem }
+.standalone-reader input:not([type="checkbox"]), .standalone-reader select {
   padding: 0.3rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-s);

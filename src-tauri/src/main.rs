@@ -39,6 +39,8 @@ mod perf;
 mod reader;
 #[cfg(windows)]
 mod pdf_text;
+#[cfg(windows)]
+mod ocr;
 #[cfg(target_os = "linux")]
 mod sandbox;
 // cp-secrets: app.secretStorage over the OS keyring (Secret Service)

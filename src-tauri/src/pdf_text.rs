@@ -13,7 +13,7 @@ use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::kurbo::{Affine, BezPath, Rect};
 use serde::Serialize;
 
-use crate::index::MAX_NOTE_BYTES;
+use crate::{index::MAX_NOTE_BYTES, ocr, pdf};
 
 const TOO_LARGE: &str = "The extracted Markdown exceeds the document size limit. Select fewer pages.";
 
@@ -21,13 +21,15 @@ const TOO_LARGE: &str = "The extracted Markdown exceeds the document size limit.
 pub struct Conversion {
     pub text: String,
     pub omitted: Vec<usize>,
+    pub recognized: Vec<usize>,
 }
 
-pub fn convert(pdf: &Pdf, selection: &str) -> Result<Conversion, String> {
+pub fn convert(pdf: &Pdf, selection: &str, ocr_language: Option<ocr::Language>) -> Result<Conversion, String> {
     let pages = pdf.pages();
     let selected = selected_pages(selection, pages.len())?;
     let cache = InterpreterCache::new();
-    let mut result = Conversion { text: String::new(), omitted: Vec::new() };
+    let mut result = Conversion { text: String::new(), omitted: Vec::new(), recognized: Vec::new() };
+    let mut engine = None;
 
     for (index, page) in pages.iter().enumerate().filter(|(index, _)| selected[*index]) {
         let number = index + 1;
@@ -47,7 +49,24 @@ pub fn convert(pdf: &Pdf, selection: &str) -> Result<Conversion, String> {
         if device.too_large {
             return Err(TOO_LARGE.to_owned());
         }
-        if !device.has_text {
+        let text = if device.has_text {
+            device.text
+        } else if let Some(language) = ocr_language {
+            if engine.is_none() {
+                engine = Some(ocr::Tesseract::open(language)?);
+            }
+            let engine = engine.as_ref().expect("OCR engine initialized");
+            let png = pdf::page_png(pdf, number, pdf::MAX_W)
+                .ok_or_else(|| format!("Could not render page {number} for OCR."))?;
+            let text = engine.recognize(&png).map_err(|error| format!("Page {number}. {error}"))?;
+            if !text.trim().is_empty() {
+                result.recognized.push(number);
+            }
+            text
+        } else {
+            String::new()
+        };
+        if text.trim().is_empty() {
             result.omitted.push(number);
             continue;
         }
@@ -55,11 +74,14 @@ pub fn convert(pdf: &Pdf, selection: &str) -> Result<Conversion, String> {
             result.text.push('\n');
         }
         let _ = writeln!(result.text, "## Page {number}\n");
-        append_markdown(&mut result.text, device.text.trim())?;
+        append_markdown(&mut result.text, text.trim())?;
         result.text.push('\n');
     }
 
     if result.text.is_empty() {
+        if ocr_language.is_some() {
+            return Err("OCR did not find text on any of the selected pages.".to_owned());
+        }
         return Err("No selectable text was found in the selected pages. Scanned pages require OCR.".to_owned());
     }
     if result.text.len() as u64 > MAX_NOTE_BYTES {

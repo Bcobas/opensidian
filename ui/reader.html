@@ -13,6 +13,13 @@
       <input id="reader-ranges" type="text" maxlength="4096" placeholder="All pages" aria-describedby="reader-range-help" title="Enter pages or ranges, e.g. 1-3, 6. Leave blank for all pages.">
     </label>
     <span id="reader-range-help" hidden>Enter pages or ranges, e.g. 1-3, 6. Leave blank for all pages.</span>
+    <div id="reader-ocr-options" hidden>
+      <label><input id="reader-use-ocr" type="checkbox"> OCR scanned pages</label>
+      <select id="reader-ocr-language" aria-label="OCR language" disabled>
+        <option value="spanish">Español</option>
+        <option value="english">English</option>
+      </select>
+    </div>
     <button id="reader-convert" hidden>Convert to Markdown</button>
     <button id="reader-edit" aria-pressed="false">Edit</button>
     <button id="reader-preview" aria-pressed="true">Preview</button>

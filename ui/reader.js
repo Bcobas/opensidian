@@ -17,6 +17,8 @@ const discard = $("reader-discard");
 const pdfPane = $("reader-pdf");
 const documentPane = $("reader-document-pane");
 const ranges = $("reader-ranges");
+const useOcr = $("reader-use-ocr");
+const ocrLanguage = $("reader-ocr-language");
 const pageNumber = $("reader-page-number");
 const pageImage = $("reader-page-image");
 const pageError = $("reader-page-error");
@@ -51,6 +53,8 @@ function updateActions() {
   copy.disabled = reload.disabled = busy;
   edit.disabled = view.disabled = busy;
   convert.disabled = ranges.disabled = pageNumber.disabled = busy;
+  useOcr.disabled = busy;
+  ocrLanguage.disabled = busy || !useOcr.checked;
   prev.disabled = busy || currentPage <= 1;
   next.disabled = busy || currentPage >= pages;
   source.readOnly = busy;
@@ -154,18 +158,27 @@ function closeDocument() {
   confirmDiscard("Discard your unsaved changes?", () => invoke("close_reader").catch(setReaderStatus));
 }
 
+function pageSummary(pages) {
+  const listed = pages.slice(0, 12).join(", ");
+  return listed + (pages.length > 12 ? ` and ${pages.length - 12} more` : "");
+}
+
 function convertPdf() {
   return confirmDiscard("Replace your unsaved Markdown draft?", () => perform(async () => {
-    setReaderStatus("Extracting PDF text…");
-    const result = await invoke("convert_reader_pdf", { selection: ranges.value });
+    const language = useOcr.checked ? ocrLanguage.value : null;
+    setReaderStatus(language ? "Extracting PDF text and recognizing scanned pages…" : "Extracting PDF text…");
+    const result = await invoke("convert_reader_pdf", { selection: ranges.value, ocrLanguage: language });
     converting = true;
     exportedText = null;
     source.value = savedText = result.text;
     await showMode(true);
-    const omitted = result.omitted;
-    const listed = omitted.slice(0, 12).join(", ");
-    const remainder = omitted.length > 12 ? ` and ${omitted.length - 12} more` : "";
-    setReaderStatus(omitted.length ? `No selectable text on pages ${listed}${remainder}.` : "");
+    const messages = [];
+    if (result.recognized.length) messages.push(`OCR recognized text on pages ${pageSummary(result.recognized)}.`);
+    if (result.omitted.length) {
+      const missing = language ? "No text found" : "No selectable text";
+      messages.push(`${missing} on pages ${pageSummary(result.omitted)}.`);
+    }
+    setReaderStatus(messages.join(" "));
   }));
 }
 
@@ -183,6 +196,7 @@ pageNumber.addEventListener("keydown", event => {
 ranges.addEventListener("keydown", event => {
   if (event.key === "Enter" && !convert.disabled) convertPdf();
 });
+useOcr.onchange = updateActions;
 pageImage.onerror = () => {
   pageImage.hidden = true;
   pageError.hidden = false;
@@ -250,6 +264,7 @@ async function openDocument() {
     pageNumber.max = pages;
     $("reader-page-count").textContent = `/ ${pages}`;
     $("reader-pdf-selection").hidden = false;
+    $("reader-ocr-options").hidden = false;
     pdfPane.hidden = false;
     showPage(1);
     return;
