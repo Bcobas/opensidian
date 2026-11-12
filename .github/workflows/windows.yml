@@ -45,6 +45,13 @@ jobs:
       - name: Test standalone editing and document conversion
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian reader::tests
+      - name: Test local history and note views
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian history::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_views::tests
       - name: Test OCR on a scanned PDF
         working-directory: src-tauri
         shell: pwsh

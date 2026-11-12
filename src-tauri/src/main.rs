@@ -28,6 +28,8 @@ use opensidian_lib::datefmt;
 use opensidian_lib::graphq;
 use opensidian_lib::index;
 mod migrate;
+mod history;
+mod note_views;
 use opensidian_lib::outline;
 mod pdf;
 mod plugins;
@@ -1141,7 +1143,77 @@ fn write_note_inner(v: &Vault, name: &str, content: &str) -> Result<(), String> 
     // R11: lock BEFORE the write — the watcher reads+compares under this
     // lock, so it never sees our bytes on disk without them in the index
     let mut ix = v.index.lock().unwrap();
+    let frel = note_rel(name).ok_or("invalid name")?;
+    let fs = vaultfs::Vault::open(&root).map_err(|e| e.to_string())?;
+    checkpoint_note(&fs, &frel, content);
     write_note_in(&root, &mut ix, name, content)
+}
+
+fn checkpoint_note(fs: &vaultfs::Vault, path: &Path, content: &str) {
+    if let Err(error) = history::before_save(fs, path, content.as_bytes()) {
+        eprintln!("[history] could not save a revision: {error}");
+    }
+}
+
+#[tauri::command]
+fn note_history(v: State<Vault>, name: String) -> Result<Vec<history::Revision>, String> {
+    let root = cur_vault(&v).ok_or("no vault open")?;
+    let _guard = v.index.lock().map_err(|e| e.to_string())?;
+    let fs = vaultfs::Vault::open(&root).map_err(|e| e.to_string())?;
+    history::list(&fs, &note_rel(&name).ok_or("invalid note name")?).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn vault_tasks(v: State<Vault>) -> Result<Vec<note_views::Task>, String> {
+    let ix = v.index.lock().map_err(|e| e.to_string())?;
+    Ok(ix.docs().flat_map(|(note, text, _)| note_views::tasks(note, text)).collect())
+}
+
+#[tauri::command]
+fn vault_note_rows(v: State<Vault>) -> Result<Vec<note_views::Row>, String> {
+    let ix = v.index.lock().map_err(|e| e.to_string())?;
+    Ok(ix.docs().map(|(note, text, _)| note_views::row(note, text)).collect())
+}
+
+#[tauri::command]
+fn read_revision(v: State<Vault>, name: String, id: String) -> Result<(String, String), String> {
+    let root = cur_vault(&v).ok_or("no vault open")?;
+    let path = note_rel(&name).ok_or("invalid note name")?;
+    let _guard = v.index.lock().map_err(|e| e.to_string())?;
+    let fs = vaultfs::Vault::open(&root).map_err(|e| e.to_string())?;
+    let now = fs.p_read(&path, index::MAX_NOTE_BYTES).map_err(|e| e.to_string())?;
+    let old = history::read(&fs, &path, &id).map_err(|e| e.to_string())?;
+    let utf8 = |bytes| String::from_utf8(bytes).map_err(|e| e.to_string());
+    Ok((utf8(now)?, utf8(old)?))
+}
+
+#[tauri::command]
+fn restore_revision(v: State<Vault>, name: String, id: String, expected: String) -> Result<String, String> {
+    let root = cur_vault(&v).ok_or("no vault open")?;
+    let mut ix = v.index.lock().map_err(|e| e.to_string())?;
+    restore_revision_in(&root, &mut ix, &name, &id, expected.as_bytes())
+}
+
+fn restore_revision_in(root: &Path, ix: &mut Index, name: &str, id: &str, expected: &[u8]) -> Result<String, String> {
+    let path = note_rel(name).ok_or("invalid note name")?;
+    let fs = vaultfs::Vault::open(root).map_err(|e| e.to_string())?;
+    let current = fs.p_read(&path, index::MAX_NOTE_BYTES).map_err(|e| e.to_string())?;
+    let changed = "The note changed since you opened the comparison. Select the revision again.";
+    if current != expected { return Err(changed.to_owned()); }
+    let previous = history::read(&fs, &path, id).map_err(|e| e.to_string())?;
+    let text = String::from_utf8(previous).map_err(|e| e.to_string())?;
+    if current != text.as_bytes() {
+        history::snapshot(&fs, &path, &current).map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        if !fs.replace_if_unchanged(&path, &current, text.as_bytes()).map_err(|e| e.to_string())? {
+            return Err(changed.to_owned());
+        }
+        #[cfg(not(windows))]
+        fs.write_atomic(&path, text.as_bytes(), false).map_err(|e| e.to_string())?;
+        let note = safe_rel(name).ok_or("invalid note name")?;
+        ix.upsert(&opensidian_lib::vault_path_string(&note), &text);
+    }
+    Ok(text)
 }
 
 /* tab-dataloss test hook: OPENSIDIAN_WRITE_DELAY_MS makes every note write a SLOW
@@ -1297,6 +1369,9 @@ fn move_note_in(root: &Path, ix: &mut Index, old: &str, new: &str) -> Result<(us
     // changes its vault-relative name by exactly this code and keeps its
     // bookmark for free.
     rename_bookmark_in(root, &okey, &nkey);
+    if let Err(error) = vaultfs::Vault::open(root).and_then(|fs| history::move_to(&fs, &ofr, &nfr)) {
+        eprintln!("[history] could not move revisions: {error}");
+    }
     Ok(radius)
 }
 
@@ -1314,8 +1389,9 @@ fn update_links_in(root: &Path, ix: &mut Index, old: &str, new: &str) -> usize {
         // swapped parent are skipped); the write itself is the fd-relative
         // atomic replace, which refuses the same things again at write time.
         let Some(frel) = note_rel(&n) else { continue };
-        if vfs.is_file(&frel) && vfs.write_atomic(&frel, c.as_bytes(), false).is_ok() {
-            wrote += 1;
+        if vfs.is_file(&frel) {
+            checkpoint_note(&vfs, &frel, &c);
+            if vfs.write_atomic(&frel, c.as_bytes(), false).is_ok() { wrote += 1; }
         }
     }
     wrote
@@ -6655,6 +6731,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             list_notes, list_images, canvas_io, canvas_attach, paste_image, read_note, write_note, create_note, render, render_blocks, block_lines, render_view, highlight_blocks, graph, graph_local, graph_view, vault_get, pick_vault,
+            note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
             create_vault, create_vault_dir, open_vault_window, switch_show, switch_ready, boot_notice, home_dir, list_dirs, list_folders, create_dir, backlinks, search,
             list_bookmarks, toggle_bookmark, bookmark_rows, bm_group_new, bm_group_rename, bm_group_delete, bm_move, bm_add, bm_drag, bm_add_at, recent_vaults, rename_note, media_rename, media_read, move_note, update_links, delete_note, link_consent, set_link_consent, strict_line_breaks, set_strict_line_breaks, qs_new_name, readable_line_length, graph_settings, set_graph_settings, tags, tag_counts,
             get_sidebar_w, set_sidebar_w, log_spans, graph_renderer_pref, type_probe, nob_probe, psg_probe, vb_probe, smoke_css,

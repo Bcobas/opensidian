@@ -4602,7 +4602,7 @@ function tabMenu(e, g, i, hdr) {
   item("Copy path", null, "Missing subsystems: submenu panels in ctxmenu (the parent menu stays OPEN beside a child panel; ours can only rebuild itself in place) and a programmatic clipboard write (the only clipboard access in the tree is inside real copy/paste events, ui/editor.js)");
   // ---- group 7 (2 rows) ----
   sep();
-  item("Open version history", null, "Missing subsystem: file history — nothing here keeps a revision of a note to show changes from or restore");
+  item("Open version history", () => { closeMenu(); void toolHistory(tab.name); });
   item("Open linked view", null, "Missing subsystem: submenu panels in ctxmenu — four of its five children already have backends here (R7 local graph, backlinks, outgoing, outline), so this is the highest-value row in this list");
   // ---- group 8 (3 rows) ----
   sep();
@@ -9546,6 +9546,10 @@ async function undoCloseTab() {
    canvasui step 5); the follow-up goal flips only this flag. Ribbon + explorer hiding do not depend on it. */
 const CV_PALETTE_HIDE_OFF = true;
 const CMDS = [
+  ["opensidian:history", "Open version history", [], () => toolHistory(toolActiveNote()), () => !!toolActiveNote()],
+  ["opensidian:daily", "Open today's note", [], toolDaily, () => !!vaultPath],
+  ["opensidian:tasks", "Open vault tasks", [], toolTasks, () => !!vaultPath],
+  ["opensidian:note-table", "Open note table", [], toolNoteTable, () => !!vaultPath],
   ["app:open-settings",        "Open settings",                       ["ctrl+,"],               () => cmdSettings()],
   // R14: the theme switch is a registry entry like any other — no bespoke
   // keystroke, no menu item of its own. It ships with NO default chord on

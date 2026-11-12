@@ -815,6 +815,31 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
 .standalone-reader .preview a.tag { cursor: default }
 .standalone-reader .reader-plain { white-space: pre-wrap }
 .standalone-reader #reader-status { margin: 0; padding: 1rem 1.25rem }
+.note-tool {
+  width: min(64rem, calc(100vw - 2rem)); max-height: 88vh; padding: 1.25rem;
+  color: var(--text-normal); background: var(--bg-base);
+  border: 1px solid var(--border); border-radius: var(--radius-s);
+}
+.note-tool::backdrop { background: var(--bg-sidebar); opacity: 0.7 }
+.note-tool header { display: flex; align-items: center; justify-content: space-between; gap: 1rem }
+.note-tool h2 { margin: 0; font-size: 1.15rem }
+.note-tool input, .note-tool select, .note-tool textarea, .note-tool button {
+  background: var(--bg-sidebar); color: inherit; border: 1px solid var(--border);
+  border-radius: var(--radius-s); padding: 0.4rem 0.55rem; font: inherit;
+}
+.note-tool button:disabled { opacity: 0.55 }
+.note-tool section { overflow: auto; margin-top: 0.8rem }
+.note-tool input + select { margin-inline-start: 0.5rem }
+.note-tool table { width: 100%; border-collapse: collapse; margin-top: 0.8rem; text-align: start }
+.note-tool th, .note-tool td { padding: 0.4rem; border-bottom: 1px solid var(--border); text-align: start; vertical-align: top }
+.note-tool-list { list-style: none; padding: 0 }
+.note-tool-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin: 0.35rem 0 }
+.note-tool-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; margin-block: 0.8rem }
+.note-tool-compare textarea { display: block; width: 100%; min-height: 45vh; resize: vertical; font-family: var(--font-monospace) }
+@media (max-width: 620px) {
+  .note-tool-compare { grid-template-columns: 1fr }
+  .note-tool-compare textarea { min-height: 25vh }
+}
 /* modeswitch opt6: the view the edit <-> reading switch left stays LAID OUT (ui/main.js
    applyMode): out of flow over the same box, same width, never painted, never hit.
    opt8: while a view is kept BOTH views are out of flow over that box (.vk2), so a toggle
