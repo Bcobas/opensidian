@@ -2171,6 +2171,23 @@ $("bmebox").addEventListener("keydown", e => {
   setTimeout(updateTitle, 0);                       // a <select> changed by arrow keys publishes its new value
 });
 $("bmebox").addEventListener("mousedown", e => { if (e.target === $("bmebox")) e.preventDefault(); });   // click-off is not Save
+const windowsFileActions = /Windows/.test(navigator.userAgent);
+
+function fileActionItem(item, label, path, action, note) {
+  if (!windowsFileActions) {
+    item(label, null, "Available on Windows");
+    return;
+  }
+  item(label, async () => {
+    closeMenu();
+    try {
+      if (action === "open_default" && note) await toolFlush(note);
+      await inv("vault_file_action", { path, action });
+      if (action === "copy_path") say("Path copied");
+    } catch (error) { say(errStr(error)); }
+  });
+}
+
 function noteMenu(e, nm) {                 // right-click a tree note row
   e.preventDefault();
   e.stopPropagation();
@@ -2199,6 +2216,15 @@ function noteMenu(e, nm) {                 // right-click a tree note row
     const g = fg(), t = g && g.active >= 0 ? g.tabs[g.active] : null;
     if (t && !t.kind && t.name === nm) cmdRename();
   });
+  if (windowsFileActions) {
+    const { item, sep } = bmMenuItems(m);
+    const path = wsPathOut(nm);
+    sep();
+    fileActionItem(item, "Copy path", path, "copy_path");
+    fileActionItem(item, "Open in default app", path, "open_default", nm);
+    fileActionItem(item, "Show in system explorer", path, "reveal");
+    sep();
+  }
   /* R24.7: Delete lives HERE, on the explorer row, because that is where the
      user is when they decide a note is finished — and it opens a question, not
      a deletion. askDelete does no I/O of its own beyond counting the inbound
@@ -4600,7 +4626,7 @@ function tabMenu(e, g, i, hdr) {
   item("Replace...", () => { closeMenu(); fOpenRep(g); });                      // WIRED: R26 replace row
   // ---- group 6 (1 row) ----
   sep();
-  item("Copy path", null, "Missing subsystems: submenu panels in ctxmenu (the parent menu stays OPEN beside a child panel; ours can only rebuild itself in place) and a programmatic clipboard write (the only clipboard access in the tree is inside real copy/paste events, ui/editor.js)");
+  fileActionItem(item, "Copy path", wsPathOut(tab.name), "copy_path");
   // ---- group 7 (2 rows) ----
   sep();
   item("Open version history", () => { closeMenu(); void toolHistory(tab.name); });
@@ -4608,8 +4634,8 @@ function tabMenu(e, g, i, hdr) {
   item("Open linked view", null, "Missing subsystem: submenu panels in ctxmenu — four of its five children already have backends here (R7 local graph, backlinks, outgoing, outline), so this is the highest-value row in this list");
   // ---- group 8 (3 rows) ----
   sep();
-  item("Open in default app", null, "Missing subsystem: a file-path opener — open_external takes a URL, not a vault path");
-  item("Show in system explorer", null, "Missing subsystem: a file-manager handler — no command reveals a path in a file manager");
+  fileActionItem(item, "Open in default app", wsPathOut(tab.name), "open_default", tab.name);
+  fileActionItem(item, "Show in system explorer", wsPathOut(tab.name), "reveal");
   item("Reveal file in navigation", () => { closeMenu(); bmReveal(tab.name); });  // WIRED: bmReveal — the identical verb bmRowMenu wires, publishes [bmrv:] (R38.28)
   // ---- group 9 (1 row) ----
   sep();
@@ -6601,7 +6627,21 @@ function fileRow(p, depth) {
   row.addEventListener("mousedown", e => treeDragStart(e, p, "file"));
   row.onclick = e => { if (treeClickEaten()) return; if (e.shiftKey && !e.ctrlKey && !e.metaKey) return treeRange(row); treeSelClear(); treeAnchor = p; if (Ed.isPdf(p)) openPdf(p, e); };   // shift = range select; issue #44: a PDF opens in the PDF view (ctrl = new tab), other types open no view
   if (Ed.isPdf(p)) row.onauxclick = e => { if (e.button === 1) { e.preventDefault(); openPdf(p, e); } };   // middle = new tab
+  if (windowsFileActions) row.oncontextmenu = e => attachmentFileMenu(e, p);
   return row;
+}
+
+function attachmentFileMenu(e, path) {
+  e.preventDefault();
+  e.stopPropagation();
+  closeMenu();
+  const menu = document.createElement("div");
+  menu.className = "ctxmenu";
+  const { item } = bmMenuItems(menu);
+  fileActionItem(item, "Copy path", path, "copy_path");
+  fileActionItem(item, "Open in default app", path, "open_default");
+  fileActionItem(item, "Show in system explorer", path, "reveal");
+  placeMenu(menu, e.clientX, e.clientY);
 }
 
 function canvasRow(p, depth) {
@@ -7918,12 +7958,12 @@ function canvasFileMenu(e, p) {             // right-click a .canvas row in the 
   };
   item("Bookmark", null, "Bookmarks hold note names (.obsidian/bookmarks.json, R9.4); a canvas is not a note");
   sep();
-  item("Copy path", null, "Missing subsystem: a programmatic clipboard write (clipboard access exists only inside real copy/paste events, ui/editor.js)");
+  fileActionItem(item, "Copy path", p, "copy_path");
   sep();
   item("Open version history", null, "Missing subsystem: file history — no revisions are kept");
   sep();
-  item("Open in default app", null, "Missing subsystem: a file-path opener — open_external takes a URL, not a vault path");
-  item("Show in system explorer", null, "Missing subsystem: a file-manager handler");
+  fileActionItem(item, "Open in default app", p, "open_default");
+  fileActionItem(item, "Show in system explorer", p, "reveal");
   sep();
   item("Rename...", () => cvRename(p));     // cv-vault CV-147
   item("Delete", () => cvDelete(p));       // cv-vault CV-148
@@ -8422,7 +8462,7 @@ function canvasTok() {
 }
 /* goal cvf-create CVR-A-009 (coordinator ruling 03:00Z): the full folder menu in stock order. Off until the operator's
    go on phase canvasui step 4 (asserts the single-item menu); flipping it on is this one line. Rows without a backend
-   (no folder rename/delete/copy/move command, no clipboard write, no file-manager handler, no bases) are listed
+   (no folder rename/delete/copy/move command or bases) are listed
    disabled with the reason, as the other explorer menus do. */
 const CV_FOLDERMENU_FULL = true;
 function folderMenuFull(item, sep, f) {
@@ -8440,7 +8480,7 @@ function folderMenuFull(item, sep, f) {
     await loadActive(g);
   });
   item("New folder", () => { $("fnew").hidden = false; $("fname").value = dir ? dir + "/" : ""; $("fname").focus(); });
-  item("New canvas", () => cmdNewCanvas(f));
+  if (CANVAS && CANVAS.isRegistered()) item("New canvas", () => cmdNewCanvas(f));
   item("New base", null, "Missing subsystem: bases (.base files) are not implemented");
   sep();
   item("Make a copy", null, "Missing subsystem: no folder copy command in the backend");
@@ -8448,15 +8488,15 @@ function folderMenuFull(item, sep, f) {
   item("Search in folder", null, "Missing subsystem: the search pane has no path: scope from a menu");
   sep();
   item("Bookmark", null, "Bookmarks hold note names (.obsidian/bookmarks.json, R9.4); a folder is not a note");
-  item("Copy path", null, "Missing subsystem: a programmatic clipboard write (clipboard access exists only inside real copy/paste events, ui/editor.js)");
+  fileActionItem(item, "Copy path", dir, "copy_path");
   sep();
-  item("Show in system explorer", null, "Missing subsystem: a file-manager handler");
+  fileActionItem(item, "Show in system explorer", dir, "reveal");
   sep();
   item("Rename...", null, "Missing subsystem: no folder rename command in the backend");
   item("Delete", null, "Missing subsystem: no folder delete command in the backend");
 }
-function folderMenu(e, f) {                 // right-click an explorer folder row: New canvas in that folder
-  if (!CANVAS || !CANVAS.isRegistered()) return;   // no row to offer -> the browser's own (suppressed) menu stays as before
+function folderMenu(e, f) {                 // right-click an explorer folder row
+  if (!windowsFileActions && (!CANVAS || !CANVAS.isRegistered())) return;
   e.preventDefault();
   e.stopPropagation();
   closeMenu();

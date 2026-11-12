@@ -72,6 +72,8 @@ mod watcher;
 mod winsize;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod file_actions;
 
 #[cfg(windows)]
 mod sandbox {
@@ -1245,6 +1247,20 @@ async fn choose_package_path(window: tauri::Window, picker: windows::PackagePick
         let _ = send.try_send(result);
     }).map_err(|error| error.to_string())?;
     receive.recv().await.ok_or("The package picker closed unexpectedly".to_owned())?
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn vault_file_action(window: tauri::Window, v: State<'_, Vault>, path: String, action: file_actions::Action) -> Result<(), String> {
+    let root = cur_vault(&v).ok_or("No vault open")?;
+    let (send, mut receive) = tauri::async_runtime::channel(1);
+    let owner = window.clone();
+    window.run_on_main_thread(move || {
+        let result = owner.hwnd().map_err(|error| error.to_string())
+            .and_then(|hwnd| file_actions::run(hwnd, &root, &path, action));
+        let _ = send.try_send(result);
+    }).map_err(|error| error.to_string())?;
+    receive.recv().await.ok_or("The file action ended unexpectedly".to_owned())?
 }
 
 #[tauri::command]
@@ -6936,6 +6952,7 @@ fn main() {
             preview_package, export_package, package_session, open_package, pick_package, save_package_as_vault, open_package_pdf,
             #[cfg(windows)] preview_updated_package,
             #[cfg(windows)] save_updated_package,
+            #[cfg(windows)] vault_file_action,
             capture_web,
             create_vault, create_vault_dir, open_vault_window, switch_show, switch_ready, boot_notice, home_dir, list_dirs, list_folders, create_dir, backlinks, search,
             list_bookmarks, toggle_bookmark, bookmark_rows, bm_group_new, bm_group_rename, bm_group_delete, bm_move, bm_add, bm_drag, bm_add_at, recent_vaults, rename_note, media_rename, media_read, move_note, update_links, delete_note, link_consent, set_link_consent, strict_line_breaks, set_strict_line_breaks, qs_new_name, readable_line_length, graph_settings, set_graph_settings, tags, tag_counts,

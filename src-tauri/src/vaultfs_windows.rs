@@ -238,6 +238,7 @@ impl Dir {
 
 pub struct Vault {
     root: Dir,
+    root_path: PathBuf,
 }
 
 impl Vault {
@@ -255,7 +256,7 @@ impl Vault {
         if !check(&file, volume.as_os_str())?.is_dir() {
             return Err(refused(&root, "invalid volume"));
         }
-        let mut vault = Self { root: Dir { handles: vec![file] } };
+        let mut vault = Self { root: Dir { handles: vec![file] }, root_path: root.clone() };
         for entry in path {
             let Component::Normal(name) = entry else { return Err(refused(&root, "invalid root")); };
             let next = directory_at(vault.root.handle(), name, OPEN)?;
@@ -299,6 +300,15 @@ impl Vault {
     pub fn open_read(&self, rel: &Path) -> io::Result<File> {
         let (parent, name) = self.parent(rel, false)?;
         regular(open_at(parent.handle(), name, READ_DATA, SHARE_READ | SHARE_WRITE | SHARE_DELETE, OPEN, 0)?)
+    }
+
+    /// Keep the checked target and its ancestors open while a Windows API uses its path.
+    pub fn with_shell_path<T>(
+        &self, rel: &Path, use_path: impl FnOnce(&Path, bool) -> T,
+    ) -> io::Result<T> {
+        let (parent, name) = self.parent(rel, false)?;
+        let file = open_at(parent.handle(), name, READ_DATA, SHARE_READ | SHARE_WRITE, OPEN, 0)?;
+        Ok(use_path(&self.root_path.join(rel), file.metadata()?.is_dir()))
     }
 
     pub fn is_file(&self, rel: &Path) -> bool {
@@ -618,10 +628,28 @@ mod tests {
         let vault = Vault::open(&root.0).unwrap();
         std::fs::write(outside.0.join("private.md"), b"outside").unwrap();
         assert!(vault.open_read(Path::new("junction/private.md")).is_err());
+        assert!(vault.with_shell_path(Path::new("junction"), |_, _| ()).is_err());
+        assert!(vault.with_shell_path(Path::new("junction/private.md"), |_, _| ()).is_err());
         assert!(vault.write_atomic(Path::new("junction/private.md"), b"overwrite", true).is_err());
         assert!(vault.write_atomic(Path::new("ordinary.md:hidden"), b"stream", false).is_err());
         assert_eq!(std::fs::read(outside.0.join("private.md")).unwrap(), b"outside");
         std::fs::remove_dir(link).unwrap();
+    }
+
+    #[test]
+    fn pins_shell_target_until_dispatch_returns() {
+        let root = Fixture::new();
+        let vault = Vault::open(&root.0).unwrap();
+        let rel = Path::new("folder/Note.md");
+        vault.mkdir_p(Path::new("folder")).unwrap();
+        vault.write_atomic(rel, b"# Note", false).unwrap();
+        let moved = root.0.join("folder/Renamed.md");
+        vault.with_shell_path(rel, |path, is_dir| {
+            assert!(!is_dir);
+            assert!(std::fs::rename(path, &moved).is_err());
+            assert!(std::fs::rename(path.parent().unwrap(), root.0.join("renamed-folder")).is_err());
+        }).unwrap();
+        std::fs::rename(root.0.join(rel), moved).unwrap();
     }
 
     #[test]
