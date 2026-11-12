@@ -196,7 +196,25 @@ function toolPortableExport(name) {
   });
 }
 
-function toolOpenPackage() {
+let packagePickerOpen = false;
+
+function toolPackageError(error) {
+  const message = errStr(error);
+  if (vaultPath) say(message);
+  else $("p-err").textContent = message;
+}
+
+async function toolOpenPackage() {
+  if (packagePickerOpen) return;
+  packagePickerOpen = true;
+  try {
+    if (await inv("pick_package")) return;
+  } catch (error) {
+    toolPackageError(error);
+    return;
+  } finally {
+    packagePickerOpen = false;
+  }
   const { dialog, body, status } = toolDialog("Open portable package");
   const form = toolNode("form");
   const label = toolNode("label", "Full path to the .opensidian.zip file");

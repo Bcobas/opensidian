@@ -11942,7 +11942,14 @@ TAURI.event.listen("vault-changed", e => onVaultChanged(e.payload));
 TAURI.event.listen("vault-css-changed", e => onVaultCssChanged(e.payload));  // themefs item 6: hot reload
 // R31.1: a real OS drop arrives here, from Rust, never from a DOM drop event.
 // osdrop: the payload is [paths, x, y] (main.rs R31.1), x/y physical px in the webview
-TAURI.event.listen("drop-files", e => { const p = e.payload || []; attachDrop(p[0] || [], { x: p[1], y: p[2] }); });
+TAURI.event.listen("drop-files", e => {
+  const [paths = [], x, y] = e.payload || [];
+  if (paths.length === 1 && /\.opensidian\.zip$/i.test(paths[0])) {
+    inv("open_package", { path: paths[0] }).catch(toolPackageError);
+    return;
+  }
+  attachDrop(paths, { x, y });
+});
 /* tab-dataloss: QUIT FLUSHES. The window close (button, Alt+F4, WM) and SIGTERM
    no longer destroy the page with a debounce timer still armed: the backend
    holds the quit and sends "app-quit" (main.rs QUIT_EVENT); this flushes every

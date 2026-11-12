@@ -360,6 +360,9 @@ pub fn is_package(path: &Path) -> bool {
 }
 
 pub fn launch(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() || !is_package(path) || !path.is_file() {
+        return Err("Choose an existing .opensidian.zip file.".to_owned());
+    }
     std::process::Command::new(std::env::current_exe().map_err(fail)?)
         .arg(path).env_remove("VAULT_DIR").spawn().map(drop).map_err(fail)
 }

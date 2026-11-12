@@ -1215,11 +1215,31 @@ fn package_session(session: State<PackageState>) -> Option<(String, String)> {
 
 #[tauri::command]
 fn open_package(path: String) -> Result<(), String> {
-    let path = PathBuf::from(path.trim().trim_matches('"'));
-    if !path.is_absolute() || !portable::is_package(&path) || !path.is_file() {
-        return Err("Choose an existing .opensidian.zip file using its full path.".to_owned());
+    portable::launch(Path::new(path.trim().trim_matches('"')))
+}
+
+#[tauri::command]
+async fn pick_package(window: tauri::Window) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        let (send, mut receive) = tauri::async_runtime::channel(1);
+        let owner = window.clone();
+        window.run_on_main_thread(move || {
+            let result = owner.hwnd().map_err(|error| error.to_string()).and_then(|hwnd| {
+                windows::pick_package(hwnd).map_err(|error| error.to_string())
+            });
+            let _ = send.try_send(result);
+        }).map_err(|error| error.to_string())?;
+        if let Some(path) = receive.recv().await.ok_or("The package picker closed unexpectedly")?? {
+            portable::launch(&path)?;
+        }
+        Ok(true)
     }
-    portable::launch(&path)
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        Ok(false)
+    }
 }
 
 #[tauri::command]
@@ -6851,7 +6871,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_notes, list_images, canvas_io, canvas_attach, paste_image, read_note, write_note, create_note, render, render_blocks, block_lines, render_view, highlight_blocks, graph, graph_local, graph_view, vault_get, pick_vault,
             note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
-            preview_package, export_package, package_session, open_package, open_package_pdf,
+            preview_package, export_package, package_session, open_package, pick_package, open_package_pdf,
             capture_web,
             create_vault, create_vault_dir, open_vault_window, switch_show, switch_ready, boot_notice, home_dir, list_dirs, list_folders, create_dir, backlinks, search,
             list_bookmarks, toggle_bookmark, bookmark_rows, bm_group_new, bm_group_rename, bm_group_delete, bm_move, bm_add, bm_drag, bm_add_at, recent_vaults, rename_note, media_rename, media_read, move_note, update_links, delete_note, link_consent, set_link_consent, strict_line_breaks, set_strict_line_breaks, qs_new_name, readable_line_length, graph_settings, set_graph_settings, tags, tag_counts,

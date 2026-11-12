@@ -453,7 +453,7 @@ pub fn run(path: &Path, mut context: tauri::Context<Wry>, initial_page: usize) {
         })
         .invoke_handler(tauri::generate_handler![
             standalone_document, convert_reader_pdf, preview_reader_markdown, save_reader_markdown, export_reader_markdown,
-            preview_reader_package, export_reader_package, open_reader_package,
+            preview_reader_package, export_reader_package, open_reader_package, crate::pick_package,
             reload_reader_document, open_reader_link, open_reader_document, close_reader
         ])
         .run(context)

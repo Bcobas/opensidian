@@ -1,8 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::ffi::c_void;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{FromRawHandle, OwnedHandle, RawHandle};
+use std::path::PathBuf;
 use std::ptr::null;
+
+use ::windows::core::{w, HRESULT};
+use ::windows::Win32::{
+    Foundation::{ERROR_CANCELLED, HWND},
+    System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED},
+    UI::Shell::{Common::COMDLG_FILTERSPEC, FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
+        FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST, SIGDN_FILESYSPATH},
+};
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -41,4 +51,39 @@ pub fn open_url(url: &str) -> Result<(), String> {
         return Err(format!("could not open link (Windows shell error {result})"));
     }
     Ok(())
+}
+
+/// Show a modal file picker on the window's UI thread.
+pub fn pick_package(owner: HWND) -> ::windows::core::Result<Option<PathBuf>> {
+    struct Apartment;
+    impl Drop for Apartment {
+        fn drop(&mut self) {
+            // This guard is created only after a successful initialization on this thread.
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    // The caller runs this on the window thread. Shell objects and their path
+    // buffers are used and released in this apartment before returning.
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+        let _apartment = Apartment;
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+        dialog.SetTitle(w!("Open portable package"))?;
+        dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+            pszName: w!("Opensidian packages (*.opensidian.zip)"),
+            pszSpec: w!("*.opensidian.zip"),
+        }])?;
+        dialog.SetOptions(dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST)?;
+        match dialog.Show(Some(owner)) {
+            Err(error) if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => return Ok(None),
+            other => other?,
+        }
+
+        let item = dialog.GetResult()?;
+        let wide = item.GetDisplayName(SIGDN_FILESYSPATH)?;
+        let path = PathBuf::from(std::ffi::OsString::from_wide(wide.as_wide()));
+        CoTaskMemFree(Some(wide.0.cast()));
+        Ok(Some(path))
+    }
 }

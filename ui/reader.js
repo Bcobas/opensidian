@@ -11,6 +11,7 @@ const edit = $("reader-edit");
 const view = $("reader-preview");
 const save = $("reader-save");
 const pack = $("reader-package");
+const openPackage = $("reader-open-package");
 const copy = $("reader-copy");
 const reload = $("reader-reload");
 const statusLine = $("reader-status");
@@ -52,6 +53,7 @@ function updateActions() {
   save.disabled = busy || conflict || (copyOnly ? source.value === exportedText : !dirty());
   pack.hidden = copyOnly;
   pack.disabled = busy;
+  openPackage.disabled = busy;
   copy.hidden = reload.hidden = !conflict;
   copy.disabled = reload.disabled = busy;
   edit.disabled = view.disabled = busy;
@@ -207,6 +209,7 @@ pageImage.onerror = () => {
 edit.onclick = () => showMode(true);
 view.onclick = () => showMode(false);
 save.onclick = saveDocument;
+openPackage.onclick = () => perform(() => invoke("pick_package"));
 pack.onclick = () => {
   const text = source.value;
   return portableExportDialog({
