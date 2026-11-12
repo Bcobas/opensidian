@@ -1248,6 +1248,7 @@ fn open_package_pdf(session: State<PackageState>, path: String, anchor: String) 
 async fn capture_web(
     app: tauri::AppHandle, title: String, url: String, fragment: Option<String>, images: bool,
 ) -> Result<(String, usize), String> {
+    use tauri::Manager;
     let title = title.trim();
     let title = safe_rel(title).filter(|name| name.components().count() == 1).ok_or("Enter a valid note title")?;
     let name = format!("{}/{}", web_clip::FOLDER, title.to_string_lossy());
@@ -6890,6 +6891,7 @@ fn main() {
         .build(ctx)
         .expect("tauri build")
         .run(|app, event| {
+            use tauri::Manager;
             if matches!(event, tauri::RunEvent::Exit) {
                 if let Some(session) = &app.state::<PackageState>().0 { session.cleanup(); }
             }
