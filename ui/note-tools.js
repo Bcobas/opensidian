@@ -111,12 +111,20 @@ async function toolMergeNote(from) {
   };
 }
 
-async function toolHistory(name) {
+async function toolHistory(name, canvas = false) {
   if (!name) return;
   const { dialog, body, status } = toolDialog("Version history · " + name);
+  const args = canvas ? { path: name } : { name };
+  const flush = async () => {
+    if (!canvas) return toolFlush(name);
+    for (const leaf of cvLeavesOf(name)) await leaf.view.flush();
+  };
+  const close = dialog.querySelector("header button");
+  let restoring = false;
+  dialog.addEventListener("cancel", event => { if (restoring) event.preventDefault(); });
   try {
-    await toolFlush(name);
-    const revisions = await inv("note_history", { name });
+    await flush();
+    const revisions = await inv(canvas ? "canvas_version_history" : "note_history", args);
     if (!revisions.length) return status("No saved versions yet.");
     const format = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
     const select = toolSelect("Saved version", revisions.map(row => [row.id, `${format.format(row.timestamp)} · ${row.bytes} bytes`]));
@@ -132,20 +140,30 @@ async function toolHistory(name) {
     });
     let expected = null, request = 0;
     const restore = toolButton("Restore selected version", async () => {
-      if (expected === null || !window.confirm("Restore this version? The current version will be saved in history.")) return;
-      restore.disabled = select.disabled = true;
+      if (restoring || expected === null || !window.confirm("Restore this version? The current version will be saved in history.")) return;
+      restoring = restore.disabled = select.disabled = close.disabled = true;
       try {
-        await toolFlush(name);
-        const text = await inv("restore_revision", { name, id: select.value, expected });
-        await afterWrite(name);
-        for (const group of groups()) {
-          const tab = group.tabs[group.active];
-          if (tab && !tab.kind && tab.name === name && !bufDirty(group)) await reloadInPlace(group, text);
-        }
+        await flush();
+        const text = await inv(canvas ? "restore_canvas_revision" : "restore_revision", { ...args, id: select.value, expected });
+        try {
+          if (canvas) {
+            for (const leaf of cvLeavesOf(name)) await leaf.view.loadPath(name, false);
+            cvLinkDirty();
+            if (rightOpen) rSchedule();
+            for (const group of groups()) if (group.graphOn && group.graphRefresh) await group.graphRefresh();
+          } else {
+            await afterWrite(name);
+            for (const group of groups()) {
+              const tab = group.tabs[group.active];
+              if (tab && !tab.kind && tab.name === name && !bufDirty(group)) await reloadInPlace(group, text);
+            }
+          }
+          say("Restored " + name);
+        } catch (error) { say("Restored " + name + ". Could not refresh the workspace: " + errStr(error)); }
         dialog.close();
-        say("Restored " + name);
       } catch (error) {
         status(errStr(error));
+        restoring = close.disabled = false;
         select.disabled = false;
         restore.disabled = false;
       }
@@ -155,7 +173,7 @@ async function toolHistory(name) {
       restore.disabled = true;
       expected = null;
       try {
-        const [now, saved] = await inv("read_revision", { name, id: select.value });
+        const [now, saved] = await inv(canvas ? "read_canvas_revision" : "read_revision", { ...args, id: select.value });
         if (request !== id) return;
         panes[0].value = expected = now;
         panes[1].value = saved;

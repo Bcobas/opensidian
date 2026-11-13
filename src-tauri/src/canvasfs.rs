@@ -221,6 +221,15 @@ fn is_empty_doc(b: &[u8]) -> bool {
 }
 
 pub fn op(root: &Path, op: &str, path: &str, data: Option<&str>) -> Result<Value, String> {
+    op_with_relink(root, op, path, data, |vault, rel, _, next| {
+        vault.p_write(rel, next, false).map_err(|error| vaultfs::plugin_err("relink", &crate::vault_path_string(rel), &error))
+    })
+}
+
+pub fn op_with_relink(
+    root: &Path, op: &str, path: &str, data: Option<&str>,
+    write_relink: impl Fn(&Vault, &Path, &[u8], &[u8]) -> Result<(), String>,
+) -> Result<Value, String> {
     if op == "list" {
         return Ok(json!(list(root)));
     }
@@ -277,7 +286,7 @@ pub fn op(root: &Path, op: &str, path: &str, data: Option<&str>) -> Result<Value
             if out.len() as u64 > CANVAS_MAX {
                 return Err(err(op, &c, "EFBIG: canvas too large"));
             }
-            v.p_write(&rel, out.as_bytes(), false).map_err(|x| vaultfs::plugin_err(op, &c, &x))?;
+            write_relink(&v, &rel, text.as_bytes(), out.as_bytes())?;
             wrote.push(c);
         }
         return Ok(json!(wrote));

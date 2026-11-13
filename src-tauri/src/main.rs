@@ -29,6 +29,8 @@ use opensidian_lib::graphq;
 use opensidian_lib::index;
 mod migrate;
 mod history;
+#[cfg(windows)]
+mod canvas_history;
 mod note_views;
 mod portable;
 mod web_clip;
@@ -1142,10 +1144,24 @@ fn list_images(v: State<Vault>, otel: Option<perf::Ctx>) -> Vec<String> {
 fn canvas_io(v: State<Vault>, op: String, path: Option<String>, data: Option<String>, otel: Option<perf::Ctx>) -> Result<serde_json::Value, String> {
     let root = cur_vault(&v).ok_or("no vault open")?;
     let path = path.as_deref().unwrap_or("");
-    let _index = if op == "rename" { Some(v.index.lock().map_err(|error| error.to_string())?) } else { None };
+    let _index = if matches!(op.as_str(), "write" | "rename" | "trash" | "relink") {
+        Some(v.index.lock().map_err(|error| error.to_string())?)
+    } else { None };
+    #[cfg(windows)]
+    if op == "write" {
+        return span_timed!(otel => "canvas_io", canvas_history::write(&root, path, data.as_deref()));
+    }
+    #[cfg(windows)]
+    if op == "relink" {
+        return span_timed!(otel => "canvas_io", canvasfs::op_with_relink(&root, &op, path, data.as_deref(), canvas_history::replace));
+    }
     let result = span_timed!(otel => "canvas_io", canvasfs::op(&root, &op, path, data.as_deref()))?;
     if op == "rename" {
         if let Some(to) = data.as_deref() {
+            #[cfg(windows)]
+            if let Err(error) = canvas_history::move_to(&root, path, to) {
+                eprintln!("[history] could not follow the canvas move: {error}");
+            }
             if let Err(error) = retarget_bookmarks(&root, |kind, item| {
                 (kind == Some(BmTarget::Canvas) && item == path).then(|| to.to_owned())
             }) {
@@ -1154,6 +1170,30 @@ fn canvas_io(v: State<Vault>, op: String, path: Option<String>, data: Option<Str
         }
     }
     Ok(result)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn canvas_version_history(v: State<Vault>, path: String) -> Result<Vec<history::Revision>, String> {
+    let root = cur_vault(&v).ok_or("no vault open")?;
+    let _index = v.index.lock().map_err(|error| error.to_string())?;
+    canvas_history::list(&root, &path)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn read_canvas_revision(v: State<Vault>, path: String, id: String) -> Result<(String, String), String> {
+    let root = cur_vault(&v).ok_or("no vault open")?;
+    let _index = v.index.lock().map_err(|error| error.to_string())?;
+    canvas_history::compare(&root, &path, &id)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn restore_canvas_revision(v: State<Vault>, path: String, id: String, expected: String) -> Result<String, String> {
+    let root = cur_vault(&v).ok_or("no vault open")?;
+    let _index = v.index.lock().map_err(|error| error.to_string())?;
+    canvas_history::restore(&root, &path, &id, expected.as_bytes())
 }
 
 /// canvas_attach (canvasfs::attach): a NEW png/jpg/jpeg/gif/webp file in the
@@ -7181,6 +7221,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_notes, list_images, canvas_io, canvas_attach, paste_image, read_note, write_note, create_note, render, render_blocks, block_lines, render_view, highlight_blocks, graph, graph_local, graph_view, vault_get, pick_vault,
             note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
+            #[cfg(windows)] canvas_version_history,
+            #[cfg(windows)] read_canvas_revision,
+            #[cfg(windows)] restore_canvas_revision,
             #[cfg(windows)] merge_vault_notes,
             preview_package, export_package, package_session, open_package, pick_package, save_package_as_vault, open_package_pdf,
             #[cfg(windows)] preview_updated_package,

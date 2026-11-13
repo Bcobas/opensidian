@@ -8191,7 +8191,8 @@ function canvasFileMenu(e, p) {             // right-click a .canvas row in the 
   sep();
   fileActionItem(item, "Copy path", p, "copy_path");
   sep();
-  item("Open version history", null, "Missing subsystem: file history — no revisions are kept");
+  item("Open version history", windowsFileActions ? () => toolHistory(p, true) : null,
+       windowsFileActions ? null : "Available on Windows");
   sep();
   fileActionItem(item, "Open in default app", p, "open_default");
   fileActionItem(item, "Show in system explorer", p, "reveal");

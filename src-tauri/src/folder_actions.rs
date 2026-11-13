@@ -96,6 +96,10 @@ pub fn run(root: &Path, index: &mut Index, from: &str, operation: Operation) -> 
     if history_failures > 0 {
         warnings.push(format!("Could not move version history for {history_failures} note(s)"));
     }
+    let canvas_failures = crate::canvas_history::move_folder(&vault, root, &source, &target);
+    if canvas_failures > 0 {
+        warnings.push(format!("Could not move version history for {canvas_failures} canvas file(s)"));
+    }
     Ok(Change { path: to, warnings })
 }
 

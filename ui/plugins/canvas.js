@@ -932,7 +932,12 @@
       }
       /* write the board when it changed (dirty), or — force, on LEAVING the board — whenever its stock-layout text
          differs from the file: an opened canvas is re-serialised when it is left, edited or not (CVR-A-055) */
-      async save(force) {
+      save(force) {
+        const pending = (this._saveQueue || Promise.resolve()).then(() => this.writeCanvas(force));
+        this._saveQueue = pending.catch(() => {});
+        return pending;
+      }
+      async writeCanvas(force) {
         const p = this.path;
         if (!p || this.broken || this.lastText == null || (!this.dirty && !force)) return;
         this.dirty = false;
