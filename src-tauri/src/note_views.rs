@@ -58,18 +58,24 @@ pub struct Row {
 }
 
 pub fn row(name: &str, content: &str) -> Row {
-    let mut values = BTreeMap::new();
+    row_from_properties(name, &properties(content))
+}
+
+pub fn properties(content: &str) -> yaml_rust2::yaml::Hash {
     if let Some((yaml, _)) = frontmatter(content).filter(|(yaml, _)| yaml.len() <= 128 * 1024) {
         if let Ok(docs) = YamlLoader::load_from_str(yaml) {
-            if let Some(Yaml::Hash(map)) = docs.first() {
-                for (key, value) in map {
-                    if let Some(key) = key.as_str() {
-                        values.insert(key.to_owned(), display(value));
-                    }
-                }
+            if let Some(Yaml::Hash(map)) = docs.into_iter().next() {
+                return map;
             }
         }
     }
+    Default::default()
+}
+
+pub fn row_from_properties(name: &str, properties: &yaml_rust2::yaml::Hash) -> Row {
+    let values = properties.iter().filter_map(|(key, value)| {
+        Some((key.as_str()?.to_owned(), display(value)))
+    }).collect();
     Row { name: name.to_owned(), values }
 }
 

@@ -852,6 +852,7 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
 .note-tool fieldset label, .note-tool form label { display: block }
 .note-tool form input:not([type="checkbox"]), .note-tool form textarea { display: block; width: 100%; margin-block: 0.35rem 0.8rem }
 .note-tool form label:has(input[type="checkbox"]) { margin-block: 0.35rem 0.8rem }
+.note-tool form input[hidden], .note-tool form select[hidden] { display: none }
 .note-tool section > button + button { margin-inline-start: 0.5rem }
 @media (max-width: 620px) {
   .note-tool-compare { grid-template-columns: 1fr }
