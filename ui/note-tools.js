@@ -34,6 +34,67 @@ async function toolFlush(note) {
   }
 }
 
+function toolAddProperty(name) {
+  const { dialog, body, status } = toolDialog("Add property · " + name);
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const key = toolNode("input");
+  key.required = true;
+  key.maxLength = 256;
+  key.setAttribute("aria-label", "Property name");
+  key.placeholder = "Property name";
+  const kind = toolSelect("Property type", [["text", "Text"], ["number", "Number"], ["checkbox", "Checkbox"], ["list", "List"]]);
+  const value = toolNode("textarea");
+  value.rows = 2;
+  value.setAttribute("aria-label", "Property value");
+  const checked = toolNode("input");
+  checked.type = "checkbox";
+  const checkLabel = toolNode("label");
+  checkLabel.append(checked, document.createTextNode(" Checked"));
+  const add = toolNode("button", "Add property");
+  add.type = "submit";
+  const close = dialog.querySelector("header button");
+  kind.onchange = () => {
+    value.hidden = kind.value === "checkbox";
+    checkLabel.hidden = !value.hidden;
+    value.placeholder = kind.value === "list" ? "One item per line" : "Property value";
+  };
+  kind.onchange();
+  fields.append(key, kind, value, checkLabel, add);
+  form.append(fields);
+  body.append(form);
+  key.focus();
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    fields.disabled = close.disabled = true;
+    status("");
+    let content;
+    try {
+      await Promise.all(savesInFlight);
+      await toolFlush(name);
+      const data = kind.value === "checkbox" ? checked.checked
+        : kind.value === "list" ? value.value.split(/\r?\n/).map(item => item.trim()).filter(Boolean)
+        : value.value;
+      content = await inv("add_note_property", { name, key: key.value, value: { kind: kind.value, value: data } });
+    } catch (error) {
+      status(errStr(error));
+      fields.disabled = close.disabled = false;
+      return;
+    }
+    try {
+      for (const group of groups()) {
+        const tab = group.tabs[group.active];
+        if (tab && !tab.kind && tab.name === name && !bufDirty(group)) await reloadInPlace(group, content);
+      }
+      await afterWrite(name);
+      say("Property added to " + name);
+    } catch (error) { say("Property saved. Could not refresh the workspace: " + errStr(error)); }
+    dialog.close();
+  };
+}
+
 async function toolMergeNote(from) {
   const { dialog, body, status } = toolDialog("Merge note · " + from);
   const notes = notesCache.filter(name => name !== from);

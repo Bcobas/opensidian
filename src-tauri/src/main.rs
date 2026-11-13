@@ -1244,6 +1244,59 @@ fn checkpoint_note(fs: &vaultfs::Vault, path: &Path, content: &str) {
 
 #[cfg(windows)]
 #[tauri::command]
+fn add_note_property(v: State<Vault>, name: String, key: String, value: note_views::PropertyValue) -> Result<String, String> {
+    let root = cur_vault(&v).ok_or("No vault open")?;
+    let mut index = v.index.lock().map_err(|error| error.to_string())?;
+    add_note_property_in(&root, &mut index, &name, &key, value)
+}
+
+#[cfg(windows)]
+fn add_note_property_in(root: &Path, index: &mut Index, name: &str, key: &str, value: note_views::PropertyValue) -> Result<String, String> {
+    let path = note_rel(name).ok_or("Invalid note name")?;
+    let fs = vaultfs::Vault::open(root).map_err(|error| error.to_string())?;
+    let note = fs.with_shell_path(&path, |path, is_dir| {
+        !is_dir && path.canonicalize().ok().as_deref() == Some(path)
+    }).map_err(|error| error.to_string())?;
+    if !note { return Err("Select a note at its current vault path".into()); }
+    let bytes = fs.p_read(&path, index::MAX_NOTE_BYTES).map_err(|error| error.to_string())?;
+    let current = String::from_utf8(bytes).map_err(|_| "The note is not valid UTF-8")?;
+    let next = note_views::add_property(&current, key, value)?;
+    if next.len() as u64 > index::MAX_NOTE_BYTES { return Err("The note would exceed the 32 MiB limit".into()); }
+    history::snapshot(&fs, &path, current.as_bytes()).map_err(|error| error.to_string())?;
+    if !fs.replace_if_unchanged(&path, current.as_bytes(), next.as_bytes()).map_err(|error| error.to_string())? {
+        return Err("The note changed on disk. Try again.".into());
+    }
+    let name = opensidian_lib::vault_path_string(&path.with_extension(""));
+    index.upsert(&name, &next);
+    Ok(next)
+}
+
+#[cfg(all(windows, test))]
+#[test]
+fn note_property_save_updates_index_and_preserves_history() {
+    let root = std::env::temp_dir().join(format!("opensidian-property-{}", opensidian_lib::os_random_hex().unwrap()));
+    fs::create_dir(&root).unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    }
+    let _cleanup = Cleanup(root.clone());
+    let original = "# Body\r\n";
+    fs::write(root.join("Project.md"), original).unwrap();
+    let mut index = Index::build(&root);
+    let changed = add_note_property_in(&root, &mut index, "Project", "status", note_views::PropertyValue::Text("active".into())).unwrap();
+    assert_eq!(index.content("Project"), Some(changed.as_str()));
+    assert_eq!(fs::read_to_string(root.join("Project.md")).unwrap(), changed);
+    let vault = vaultfs::Vault::open(&root).unwrap();
+    let note = Path::new("Project.md");
+    let revisions = history::list(&vault, note).unwrap();
+    assert_eq!(history::read(&vault, note, &revisions[0].id).unwrap(), original.as_bytes());
+    assert!(add_note_property_in(&root, &mut index, "Project", "status", note_views::PropertyValue::Checkbox(true)).is_err());
+    assert_eq!(fs::read_to_string(root.join("Project.md")).unwrap(), changed);
+}
+
+#[cfg(windows)]
+#[tauri::command]
 async fn merge_vault_notes(app: tauri::AppHandle, from: String, to: String, trash_source: bool) -> Result<note_merge::Merge, String> {
     use tauri::Manager;
     tauri::async_runtime::spawn_blocking(move || {
@@ -7221,6 +7274,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_notes, list_images, canvas_io, canvas_attach, paste_image, read_note, write_note, create_note, render, render_blocks, block_lines, render_view, highlight_blocks, graph, graph_local, graph_view, vault_get, pick_vault,
             note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
+            #[cfg(windows)] add_note_property,
             #[cfg(windows)] canvas_version_history,
             #[cfg(windows)] read_canvas_revision,
             #[cfg(windows)] restore_canvas_revision,

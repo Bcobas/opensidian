@@ -259,7 +259,7 @@ pub fn tag_spans(s: &str) -> Vec<(usize, usize)> {
 fn frontmatter(s: &str) -> Option<(Vec<&str>, usize)> {
     let mut lines = s.split_inclusive('\n');
     let first = lines.next()?;
-    if first.trim_end() != "---" {
+    if first.trim_start_matches('\u{feff}').trim_end() != "---" {
         return None;
     }
     let mut off = first.len();

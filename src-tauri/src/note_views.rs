@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use pulldown_cmark::{Event, Options, Parser};
 use serde::Serialize;
+#[cfg(windows)]
+use serde::Deserialize;
 use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
 
 #[derive(Serialize)]
@@ -100,9 +102,134 @@ fn frontmatter(content: &str) -> Option<(&str, &str)> {
     None
 }
 
+#[cfg(windows)]
+#[derive(Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum PropertyValue {
+    Text(String),
+    Number(String),
+    Checkbox(bool),
+    List(Vec<String>),
+}
+
+#[cfg(windows)]
+pub fn add_property(content: &str, key: &str, value: PropertyValue) -> Result<String, String> {
+    const MAX_YAML_BYTES: usize = 128 * 1024;
+    let key = key.trim();
+    if key.is_empty() || key == "<<" || key.len() > 256 || key.chars().any(char::is_control) {
+        return Err("Enter a valid property name".into());
+    }
+    let eol = if content.split_once('\n').is_some_and(|(line, _)| line.ends_with('\r')) { "\r\n" } else { "\n" };
+    let body = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let existing = frontmatter(content);
+    if existing.is_none() && body.lines().next().is_some_and(|line| line.trim_end() == "---") {
+        return Err("The YAML block has no closing delimiter".into());
+    }
+    let old_yaml = existing.map_or("", |(yaml, _)| yaml);
+    if old_yaml.len() > MAX_YAML_BYTES {
+        return Err("The YAML block is too large to edit".into());
+    }
+    let old = yaml_mapping(old_yaml)?;
+    if old.keys().any(|entry| entry.as_str().is_some_and(|name| name.eq_ignore_ascii_case(key))) {
+        return Err(format!("The property “{key}” already exists"));
+    }
+
+    // Plain keys for ordinary names keep properties such as tags readable by the tag index.
+    let encoded_key = if key.starts_with(char::is_alphabetic) &&
+        key.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-')) &&
+        matches!(Yaml::from_str(key), Yaml::String(_)) {
+        key.to_owned()
+    } else {
+        serde_json::to_string(key).map_err(|error| error.to_string())?
+    };
+    let quote = |text: &str| serde_json::to_string(text).map_err(|error| error.to_string());
+    let mut line = format!("{encoded_key}:");
+    let expected = match value {
+        PropertyValue::Text(text) => {
+            line.push_str(&format!(" {}", quote(&text)?));
+            Yaml::String(text)
+        }
+        PropertyValue::Number(text) => {
+            let number = text.trim().parse::<serde_json::Number>().map_err(|_| "Enter a valid number")?;
+            if number.is_u64() && number.as_i64().is_none() { return Err("The integer is too large".into()); }
+            line.push_str(&format!(" {number}"));
+            Yaml::from_str(&number.to_string())
+        }
+        PropertyValue::Checkbox(value) => {
+            line.push_str(&format!(" {value}"));
+            Yaml::Boolean(value)
+        }
+        PropertyValue::List(items) => {
+            if items.is_empty() { line.push_str(" []"); }
+            for item in &items { line.push_str(&format!("{eol}  - {}", quote(item)?)); }
+            Yaml::Array(items.into_iter().map(Yaml::String).collect())
+        }
+    };
+    line.push_str(eol);
+
+    // Validate the splice without reserializing existing values, comments or anchors.
+    let updated_yaml = format!("{old_yaml}{line}");
+    if updated_yaml.len() > MAX_YAML_BYTES { return Err("The YAML block is too large to edit".into()); }
+    let updated = yaml_mapping(&updated_yaml)?;
+    if updated.len() != old.len() + 1 || updated.get(&Yaml::String(key.into())) != Some(&expected)
+        || old.iter().any(|(key, value)| updated.get(key) != Some(value)) {
+        return Err("This YAML layout cannot be edited safely. Use a block mapping.".into());
+    }
+    if let Some((yaml, _)) = existing {
+        let at = content.len() - body.len() + body.find('\n').expect("validated opening delimiter") + 1 + yaml.len();
+        Ok(format!("{}{line}{}", &content[..at], &content[at..]))
+    } else {
+        let bom = if body.len() == content.len() { "" } else { "\u{feff}" };
+        let separator = if body.is_empty() || body.starts_with(eol) { "" } else { eol };
+        Ok(format!("{bom}---{eol}{line}---{eol}{separator}{body}"))
+    }
+}
+
+#[cfg(windows)]
+fn yaml_mapping(text: &str) -> Result<yaml_rust2::yaml::Hash, String> {
+    let mut docs = YamlLoader::load_from_str(text)
+        .map_err(|error| format!("Could not edit the YAML block: {error}"))?;
+    if docs.is_empty() { return Ok(Default::default()); }
+    if docs.len() == 1 {
+        if let Some(Yaml::Hash(map)) = docs.pop() { return Ok(map); }
+    }
+    Err("The YAML block must be a mapping of property names to values".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn adds_typed_properties_and_preserves_existing_yaml() {
+        let original = "\u{feff}---\r\n# keep\r\npriority: 2\r\nnested:\r\n  status: ready\r\n---\r\n# Body\r\n";
+        let added = add_property(original, "project: name", PropertyValue::Text("true\nvalue".into())).unwrap();
+        assert_eq!(added, original.replace("---\r\n# Body", "\"project: name\": \"true\\nvalue\"\r\n---\r\n# Body"));
+        let added = add_property(&added, "estimate", PropertyValue::Number("1.5".into())).unwrap();
+        let added = add_property(&added, "done", PropertyValue::Checkbox(false)).unwrap();
+        let added = add_property(&added, "tags", PropertyValue::List(vec!["work".into(), "review".into()])).unwrap();
+        let properties = row("A", &added);
+        assert_eq!(properties.values["project: name"], "true\nvalue");
+        assert_eq!(properties.values["estimate"], "1.5");
+        assert_eq!(properties.values["done"], "false");
+        assert_eq!(properties.values["tags"], "work, review");
+        assert_eq!(crate::index::tags_in(&added), ["review", "work"]);
+        assert!(added.ends_with("# Body\r\n"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn creates_frontmatter_and_refuses_duplicate_or_invalid_input() {
+        let original = "# Body\n";
+        let added = add_property(original, "status", PropertyValue::Text("yes".into())).unwrap();
+        assert_eq!(added, "---\nstatus: \"yes\"\n---\n\n# Body\n");
+        assert!(add_property(&added, "STATUS", PropertyValue::Checkbox(true)).is_err());
+        for invalid in ["---\nfoo: [\n---\n", "---\nfoo: value", "---\n{foo: bar}\n---\n", "---\n- item\n---\n"] {
+            assert!(add_property(invalid, "new", PropertyValue::Checkbox(true)).is_err(), "{invalid}");
+        }
+        assert!(add_property(original, "number", PropertyValue::Number("NaN".into())).is_err());
+    }
 
     #[test]
     fn reads_real_tasks_and_yaml_properties() {

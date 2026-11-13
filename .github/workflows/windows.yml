@@ -52,6 +52,8 @@ jobs:
           cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian history::tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_views::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_property_save_updates_index_and_preserves_history
       - name: Test portable packages and web capture
         working-directory: src-tauri
         shell: pwsh

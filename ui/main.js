@@ -4831,7 +4831,8 @@ function tabMenu(e, g, i, hdr) {
     () => { closeMenu(); toggleBm(tab.name); });
   item("Merge entire file with...", windowsFileActions ? () => { closeMenu(); void toolMergeNote(tab.name); } : null,
        windowsFileActions ? null : "Available on Windows");
-  item("Add file property", null, "Missing subsystem: a frontmatter property model, which writes a Properties block at the top of the note; there is no frontmatter parser or editor here");
+  item("Add file property", windowsFileActions ? () => { closeMenu(); toolAddProperty(tab.name); } : null,
+       windowsFileActions ? null : "Available on Windows");
   item("Export to PDF...", null, "Missing subsystem: a PDF pipeline — no renderer and no page-size/margin model; PDF export is an explicit project non-goal");
   // ---- group 5 (2 rows) ----
   sep();
