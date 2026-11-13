@@ -1343,10 +1343,18 @@ fn create_vault_base(v: State<Vault>, path: String, config: bases::NewBase) -> R
 
 #[cfg(windows)]
 #[tauri::command]
-fn open_vault_base(v: State<Vault>, path: String) -> Result<Vec<bases::Table>, String> {
+fn open_vault_base(v: State<Vault>, path: String) -> Result<bases::Base, String> {
     let root = cur_vault(&v).ok_or("No vault open")?;
     let index = v.index.lock().map_err(|error| error.to_string())?;
     bases::open(&root, &index, &path)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn set_vault_base_grouping(v: State<Vault>, path: String, revision: String, id: usize, group_by: Option<bases::GroupBy>) -> Result<bases::Base, String> {
+    let root = cur_vault(&v).ok_or("No vault open")?;
+    let index = v.index.lock().map_err(|error| error.to_string())?;
+    bases::set_grouping(&root, &index, &path, &revision, id, group_by)
 }
 
 fn package_catalog(v: &Vault) -> Result<Vec<String>, String> {
@@ -7300,6 +7308,7 @@ fn main() {
             #[cfg(windows)] vault_base_paths,
             #[cfg(windows)] create_vault_base,
             #[cfg(windows)] open_vault_base,
+            #[cfg(windows)] set_vault_base_grouping,
             #[cfg(windows)] canvas_version_history,
             #[cfg(windows)] read_canvas_revision,
             #[cfg(windows)] restore_canvas_revision,

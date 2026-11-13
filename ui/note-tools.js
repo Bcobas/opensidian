@@ -350,6 +350,37 @@ async function toolNoteTable() {
   } catch (error) { status(errStr(error)); }
 }
 
+const baseFileProperties = [["file.name", "Note"], ["file.path", "Path"], ["file.folder", "Folder"], ["file.ext", "Extension"]];
+
+function basePropertyOptions(properties) {
+  return [...baseFileProperties, ...properties.map(key => ["note." + key, key])];
+}
+
+function baseGroupingFields(options, current, manual = false) {
+  const groupBy = toolSelect("Group by", [["", "No grouping"], ...options]);
+  const order = [["ASC", "Ascending"], ["DESC", "Descending"]];
+  if (manual) order.unshift(["manual", "Existing manual order"]);
+  const groupDirection = toolSelect("Group order", order);
+  groupBy.value = current?.property ?? "";
+  groupDirection.value = manual ? "manual" : current?.direction ?? "ASC";
+  groupBy.onchange = () => {
+    groupDirection.hidden = !groupBy.value;
+    if (manual) {
+      groupDirection.options[0].disabled = groupBy.value !== current.property;
+      if (groupDirection.options[0].disabled && groupDirection.value === "manual") {
+        groupDirection.value = current.direction;
+      }
+    }
+  };
+  groupBy.onchange();
+  const label = toolNode("label", "Group by");
+  label.append(groupBy);
+  return {
+    label, groupDirection,
+    read: () => groupBy.value ? { property: groupBy.value, direction: groupDirection.value } : null
+  };
+}
+
 async function toolCreateBase(folder, preset) {
   const { dialog, body, status } = toolDialog("Create a base");
   try {
@@ -368,8 +399,7 @@ async function toolCreateBase(folder, preset) {
     columns.size = 6;
     columns.setAttribute("aria-label", "Visible columns");
     const defaultColumns = new Set(preset?.columns || ["file.name"]);
-    const options = [["file.name", "Note"], ["file.path", "Path"], ["file.folder", "Folder"], ["file.ext", "Extension"],
-      ...properties.map(key => ["note." + key, key])];
+    const options = basePropertyOptions(properties);
     for (const [key, label] of options) {
       const option = toolNode("option", label);
       option.value = key;
@@ -379,12 +409,7 @@ async function toolCreateBase(folder, preset) {
     const sort = toolSelect("Sort by", []);
     const direction = toolSelect("Sort direction", [["asc", "Ascending"], ["desc", "Descending"]]);
     direction.value = preset?.descending ? "desc" : "asc";
-    const groupBy = toolSelect("Group by", [["", "No grouping"], ...options]);
-    const groupDirection = toolSelect("Group order", [["ASC", "Ascending"], ["DESC", "Descending"]]);
-    groupBy.onchange = () => { groupDirection.hidden = !groupBy.value; };
-    groupBy.onchange();
-    const groupLabel = toolNode("label", "Group by");
-    groupLabel.append(groupBy);
+    const grouping = baseGroupingFields(options);
     const scope = toolNode("input");
     scope.type = "checkbox";
     const scopeLabel = toolNode("label");
@@ -448,7 +473,7 @@ async function toolCreateBase(folder, preset) {
     columns.onchange();
     const columnLabel = toolNode("label", "Visible columns");
     columnLabel.append(columns);
-    fields.append(filename, columnLabel, sort, direction, groupLabel, groupDirection);
+    fields.append(filename, columnLabel, sort, direction, grouping.label, grouping.groupDirection);
     if (folder) fields.append(scopeLabel);
     if (properties.length) fields.append(filters);
     fields.append(save);
@@ -464,7 +489,7 @@ async function toolCreateBase(folder, preset) {
       const path = (folder ? folder + "/" : "") + name + ".base";
       const config = { columns: selected().map(([key]) => key), sort: sort.value, descending: direction.value === "desc",
         folder: folder && scope.checked ? folder : null, conditions: conditions.map(read => read()),
-        group_by: groupBy.value ? { property: groupBy.value, direction: groupDirection.value } : null };
+        group_by: grouping.read() };
       fields.disabled = close.disabled = true;
       status("");
       try { await inv("create_vault_base", { path, config }); }
@@ -482,20 +507,60 @@ async function toolCreateBase(folder, preset) {
   } catch (error) { status(errStr(error)); }
 }
 
+function toolEditBaseGrouping(base, view, write) {
+  const { dialog, body, status } = toolDialog("Edit grouping · " + view.title);
+  const properties = new Set(base.properties);
+  for (const key of [...view.columns, view.group_by?.property]) {
+    if (key?.startsWith("note.")) properties.add(key.slice(5));
+  }
+  const grouping = baseGroupingFields(basePropertyOptions([...properties].sort()), view.group_by, view.manual_groups);
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const save = toolNode("button", "Save grouping");
+  save.type = "submit";
+  const close = dialog.querySelector("header button");
+  fields.append(grouping.label, grouping.groupDirection, save);
+  form.append(fields);
+  body.append(toolNode("p", "Saving a change rewrites the YAML formatting and removes comments."), form);
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    const group = grouping.read();
+    if (group?.direction === "manual") { dialog.close(); return; }
+    fields.disabled = close.disabled = true;
+    status("");
+    try { await write(group); dialog.close(); }
+    catch (error) {
+      status(errStr(error));
+      fields.disabled = close.disabled = false;
+    }
+  };
+}
+
 async function toolOpenBase(path) {
   const { dialog, body, status } = toolDialog(path);
   try {
     await toolFlush();
-    const views = await inv("open_vault_base", { path });
+    let base = await inv("open_vault_base", { path });
     if (!dialog.open) return;
-    const choose = toolSelect("Table view", views.map((view, index) => [String(index), view.title]));
-    choose.hidden = views.length === 1;
+    const choose = toolSelect("Table view", base.views.map((view, index) => [String(index), view.title]));
+    choose.hidden = base.views.length === 1;
     const filter = toolFilter("Filter this table");
     const table = toolNode("table");
     const head = table.createTHead().insertRow();
     const collapsed = new Set();
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-    let sort = views[0].sort, descending = views[0].descending;
+    const activeView = () => base.views[Number(choose.value)];
+    let { sort, descending } = activeView();
+    const edit = toolButton("Edit grouping", () => {
+      const view = activeView();
+      toolEditBaseGrouping(base, view, async groupBy => {
+        base = await inv("set_vault_base_grouping", { path, revision: base.revision, id: view.id, groupBy });
+        collapsed.clear();
+        render();
+      });
+    });
     const value = (row, column) => {
       if (column === "file.name") return row.name.split("/").pop();
       if (column === "file.path") return row.name + ".md";
@@ -505,14 +570,14 @@ async function toolOpenBase(path) {
       return Object.hasOwn(row.values, key) ? row.values[key] : "";
     };
     const render = () => {
-      const view = views[Number(choose.value)];
+      const view = activeView();
       const query = filter.value.trim().toLocaleLowerCase();
       head.replaceChildren();
       for (const key of view.columns) {
         const cell = toolNode("th");
         cell.scope = "col";
         cell.setAttribute("aria-sort", key === sort ? (descending ? "descending" : "ascending") : "none");
-        const label = view.labels?.[key] ?? ({ "file.name": "Note", "file.path": "Path", "file.folder": "Folder", "file.ext": "Extension" }[key] ?? key.slice(5));
+        const label = view.labels?.[key] ?? baseFileProperties.find(([property]) => key === property)?.[1] ?? key.slice(5);
         cell.append(toolButton(label, () => {
           descending = sort === key ? !descending : false;
           sort = key;
@@ -565,13 +630,13 @@ async function toolOpenBase(path) {
       status(shown ? `${shown} notes` : "No notes match.");
     };
     choose.onchange = () => {
-      const view = views[Number(choose.value)];
+      const view = activeView();
       sort = view.sort;
       descending = view.descending;
       render();
     };
     filter.oninput = render;
-    body.append(filter, choose, table);
+    body.append(filter, choose, edit, table);
     render();
   } catch (error) { status(errStr(error)); }
 }
