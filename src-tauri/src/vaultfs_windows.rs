@@ -379,8 +379,24 @@ impl Vault {
     }
 
     pub fn trash(&self, rel: &Path, dir: &Path, stem: &str, ext: &str) -> io::Result<PathBuf> {
+        self.trash_checked(rel, dir, stem, ext, None)
+    }
+
+    pub fn trash_if_unchanged(&self, rel: &Path, dir: &Path, stem: &str, ext: &str, expected: &[u8]) -> io::Result<PathBuf> {
+        self.trash_checked(rel, dir, stem, ext, Some(expected))
+    }
+
+    fn trash_checked(&self, rel: &Path, dir: &Path, stem: &str, ext: &str, expected: Option<&[u8]>) -> io::Result<PathBuf> {
         let (source, name) = self.parent(rel, false)?;
-        let file = regular(open_at(source.handle(), name, DELETE, SHARE_READ, OPEN, 0)?)?;
+        let access = if expected.is_some() { DELETE | READ_DATA } else { DELETE };
+        let file = regular(open_at(source.handle(), name, access, SHARE_READ, OPEN, 0)?)?;
+        if let Some(expected) = expected {
+            let mut current = Vec::new();
+            (&file).take(expected.len() as u64 + 1).read_to_end(&mut current)?;
+            if current != expected {
+                return Err(io::Error::other("the source changed during the merge"));
+            }
+        }
         let destination = self.dir(dir, true)?;
         for i in 0..10_000 {
             let name = if i == 0 { format!("{stem}.{ext}") } else { format!("{stem}.{i}.{ext}") };

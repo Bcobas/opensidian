@@ -76,6 +76,8 @@ mod windows;
 mod file_actions;
 #[cfg(windows)]
 mod folder_actions;
+#[cfg(windows)]
+mod note_merge;
 
 #[cfg(windows)]
 mod sandbox {
@@ -1186,6 +1188,18 @@ fn checkpoint_note(fs: &vaultfs::Vault, path: &Path, content: &str) {
     if let Err(error) = history::before_save(fs, path, content.as_bytes()) {
         eprintln!("[history] could not save a revision: {error}");
     }
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn merge_vault_notes(app: tauri::AppHandle, from: String, to: String, trash_source: bool) -> Result<note_merge::Merge, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        let vault = app.state::<Vault>();
+        let root = cur_vault(&vault).ok_or("No vault open")?;
+        let mut index = vault.index.lock().map_err(|error| error.to_string())?;
+        note_merge::run(&root, &mut index, &from, &to, trash_source)
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -7021,6 +7035,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_notes, list_images, canvas_io, canvas_attach, paste_image, read_note, write_note, create_note, render, render_blocks, block_lines, render_view, highlight_blocks, graph, graph_local, graph_view, vault_get, pick_vault,
             note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
+            #[cfg(windows)] merge_vault_notes,
             preview_package, export_package, package_session, open_package, pick_package, save_package_as_vault, open_package_pdf,
             #[cfg(windows)] preview_updated_package,
             #[cfg(windows)] save_updated_package,

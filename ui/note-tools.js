@@ -34,6 +34,83 @@ async function toolFlush(note) {
   }
 }
 
+async function toolMergeNote(from) {
+  const { dialog, body, status } = toolDialog("Merge note · " + from);
+  const notes = notesCache.filter(name => name !== from);
+  if (!notes.length) { status("There are no other notes in this vault."); return; }
+  const filter = toolFilter("Filter destination notes");
+  const target = toolSelect("Destination note", []);
+  const trash = toolNode("input");
+  trash.type = "checkbox";
+  const trashLabel = toolNode("label");
+  trashLabel.append(trash, document.createTextNode(" Move the source note to the vault trash after merging"));
+  const info = toolNode("p", "The source is appended to the destination. Relative links may need updating when the notes are in different folders.");
+  const form = toolNode("form");
+  const controls = toolNode("fieldset");
+  const close = dialog.querySelector("header button");
+  const merge = toolNode("button", "Merge into selected note");
+  merge.type = "submit";
+  controls.append(info, filter, target, trashLabel, merge);
+  form.append(controls);
+  body.append(form);
+  dialog.addEventListener("cancel", event => { if (controls.disabled) event.preventDefault(); });
+  filter.oninput = () => {
+    const previous = target.value;
+    const query = filter.value.trim().toLowerCase();
+    const placeholder = toolNode("option", "Choose a destination note");
+    placeholder.value = "";
+    const matches = notes.filter(name => name.toLowerCase().includes(query));
+    target.replaceChildren(placeholder, ...matches.map(name => {
+      const option = toolNode("option", name);
+      option.value = name;
+      return option;
+    }));
+    target.value = matches.includes(previous) ? previous : "";
+    target.onchange();
+  };
+  target.onchange = () => { merge.disabled = !target.value; };
+  filter.oninput();
+  filter.focus();
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const to = target.value;
+    if (!to || controls.disabled) return;
+    controls.disabled = close.disabled = true;
+    status("");
+    let result;
+    try {
+      await Promise.all(savesInFlight);
+      await toolFlush(from);
+      await toolFlush(to);
+      result = await inv("merge_vault_notes", { from, to, trashSource: trash.checked });
+    } catch (error) {
+      status(errStr(error));
+      controls.disabled = close.disabled = false;
+      return;
+    }
+    try {
+      await afterWrite(to);
+      for (const group of groups()) {
+        const tab = group.tabs[group.active];
+        if (tab && !tab.kind && tab.name === to && !bufDirty(group)) await reloadInPlace(group, result.content);
+      }
+      if (result.trashed) await afterDelete(from);
+      dialog.close();
+      const existing = groups().find(group => group.tabs.some(tab => !tab.kind && tab.name === to));
+      if (existing) {
+        focusGroup(existing);
+        await switchTab(existing, existing.tabs.findIndex(tab => !tab.kind && tab.name === to));
+      } else {
+        await openNewTab(to);
+      }
+      say(result.warning || "Merged into " + to);
+    } catch (error) {
+      dialog.close();
+      say("Merged into " + to + ". Could not refresh the workspace: " + errStr(error));
+    }
+  };
+}
+
 async function toolHistory(name) {
   if (!name) return;
   const { dialog, body, status } = toolDialog("Version history · " + name);
