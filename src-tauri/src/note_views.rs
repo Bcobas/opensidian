@@ -51,7 +51,7 @@ pub fn custom_marker(text: &str) -> Option<(char, usize)> {
     Some((status, text.len() - rest.trim_start().len()))
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Row {
     name: String,
     values: BTreeMap<String, String>,

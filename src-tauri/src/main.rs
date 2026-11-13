@@ -32,6 +32,8 @@ mod history;
 #[cfg(windows)]
 mod canvas_history;
 mod note_views;
+#[cfg(windows)]
+mod bases;
 mod portable;
 mod web_clip;
 use opensidian_lib::outline;
@@ -1325,6 +1327,26 @@ fn vault_tasks(v: State<Vault>) -> Result<Vec<note_views::Task>, String> {
 fn vault_note_rows(v: State<Vault>) -> Result<Vec<note_views::Row>, String> {
     let ix = v.index.lock().map_err(|e| e.to_string())?;
     Ok(ix.docs().map(|(note, text, _)| note_views::row(note, text)).collect())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn vault_base_paths(v: State<Vault>) -> Result<Vec<String>, String> {
+    bases::list(&cur_vault(&v).ok_or("No vault open")?)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn create_vault_base(v: State<Vault>, path: String, config: bases::NewBase) -> Result<(), String> {
+    bases::create(&cur_vault(&v).ok_or("No vault open")?, &path, config)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn open_vault_base(v: State<Vault>, path: String) -> Result<Vec<bases::Table>, String> {
+    let root = cur_vault(&v).ok_or("No vault open")?;
+    let index = v.index.lock().map_err(|error| error.to_string())?;
+    bases::open(&root, &index, &path)
 }
 
 fn package_catalog(v: &Vault) -> Result<Vec<String>, String> {
@@ -7275,6 +7297,9 @@ fn main() {
             list_notes, list_images, canvas_io, canvas_attach, paste_image, read_note, write_note, create_note, render, render_blocks, block_lines, render_view, highlight_blocks, graph, graph_local, graph_view, vault_get, pick_vault,
             note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
             #[cfg(windows)] add_note_property,
+            #[cfg(windows)] vault_base_paths,
+            #[cfg(windows)] create_vault_base,
+            #[cfg(windows)] open_vault_base,
             #[cfg(windows)] canvas_version_history,
             #[cfg(windows)] read_canvas_revision,
             #[cfg(windows)] restore_canvas_revision,

@@ -6848,7 +6848,13 @@ function fileRow(p, depth) {
   row.querySelector(".ttag").textContent = d > 0 ? base.slice(d + 1).toUpperCase() : "";
   row.dataset.file = p;
   row.addEventListener("mousedown", e => treeDragStart(e, p, "file"));
-  row.onclick = e => { if (treeClickEaten()) return; if (e.shiftKey && !e.ctrlKey && !e.metaKey) return treeRange(row); treeSelClear(); treeAnchor = p; if (Ed.isPdf(p)) openPdf(p, e); };   // shift = range select; issue #44: a PDF opens in the PDF view (ctrl = new tab), other types open no view
+  row.onclick = e => {
+    if (treeClickEaten()) return;
+    if (e.shiftKey && !e.ctrlKey && !e.metaKey) return treeRange(row);
+    treeSelClear(); treeAnchor = p;
+    if (Ed.isPdf(p)) openPdf(p, e);
+    else if (windowsFileActions && /\.base$/i.test(p)) void toolOpenBase(p);
+  };
   if (Ed.isPdf(p)) row.onauxclick = e => { if (e.button === 1) { e.preventDefault(); openPdf(p, e); } };   // middle = new tab
   if (windowsFileActions) row.oncontextmenu = e => attachmentFileMenu(e, p);
   return row;
@@ -7154,6 +7160,7 @@ function treeHighlight() {
 }
 async function refreshTree() {
   const mediaP = inv("canvas_io", { op: "media", path: "" }).catch(() => []);   // goal cv-journeys: audio / video rows, in parallel
+  const basesP = windowsFileActions ? inv("vault_base_paths").catch(() => []) : [];
   const [folders, notes, imgs] =
     await Promise.all([inv("list_folders"), inv("list_notes"), inv("list_images")]);
   notesCache = notes;
@@ -7166,7 +7173,7 @@ async function refreshTree() {
   if (CANVAS && CANVAS.isRegistered()) { try { canvases = await inv("canvas_io", { op: "list", path: "" }); } catch (_) { canvases = []; } }
   // goal cv-journeys: images + PDFs (list_images) and audio / video (canvas_io media) are listed too, as stock does
   const media = await mediaP;
-  const others = [...(imgs || []), ...(media || [])];
+  const others = [...(imgs || []), ...(media || []), ...await basesP];
   const sig = folders.join("\n") + "\0" + notes.join("\n") + "\0" + canvases.join("\n") + "\0" + others.join("\n");
   if (sig === treeSig && tree.childElementCount) { treeHighlight(); return; }
   if (PLGVS && others.join("\n") !== treeSig.split("\0")[3]) await PLGVS();   // a new image (a paste, a drop) is a TFile before its card paints
@@ -8890,7 +8897,7 @@ function folderMenuFull(item, sep, f) {
   });
   item("New folder", () => { $("fnew").hidden = false; $("fname").value = dir ? dir + "/" : ""; $("fname").focus(); });
   if (CANVAS && CANVAS.isRegistered()) item("New canvas", () => cmdNewCanvas(f));
-  item("New base", null, "Missing subsystem: bases (.base files) are not implemented");
+  item("New base", windowsFileActions ? () => toolCreateBase(dir) : null, windowsFileActions ? null : "Available on Windows");
   sep();
   item("Make a copy", windowsFileActions ? () => folderActionDialog(dir, "copy") : null, windowsFileActions ? null : "Available on Windows");
   item("Move folder to...", windowsFileActions ? () => folderActionDialog(dir, "move") : null, windowsFileActions ? null : "Available on Windows");
@@ -10003,6 +10010,7 @@ const CMDS = [
   ["opensidian:daily", "Open today's note", [], toolDaily, () => !!vaultPath],
   ["opensidian:tasks", "Open vault tasks", [], toolTasks, () => !!vaultPath],
   ["opensidian:note-table", "Open note table", [], toolNoteTable, () => !!vaultPath],
+  ["opensidian:new-base", "Create a base", [], () => toolCreateBase(""), () => !!vaultPath && windowsFileActions],
   ["opensidian:package-export", "Export note with its files", [], () => toolPortableExport(toolActiveNote()), () => !!toolActiveNote()],
   ["opensidian:package-open", "Open portable package", [], toolOpenPackage],
   ["opensidian:package-save-vault", "Save package as vault", [], toolSavePackageAsVault, () => !!packageInfo?.[2]],

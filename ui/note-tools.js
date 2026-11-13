@@ -338,6 +338,165 @@ async function toolNoteTable() {
     }
     filter.oninput = render;
     body.append(filter, table);
+    if (windowsFileActions) body.prepend(toolButton("Save as base", () => {
+      dialog.close();
+      void toolCreateBase("", {
+        columns: ["file.name", ...keys.map(key => "note." + key)],
+        sort: sortKey === null ? "file.name" : "note." + sortKey,
+        descending: direction < 0
+      });
+    }));
+    render();
+  } catch (error) { status(errStr(error)); }
+}
+
+async function toolCreateBase(folder, preset) {
+  const { dialog, body, status } = toolDialog("Create a base");
+  try {
+    await toolFlush();
+    const rows = await inv("vault_note_rows");
+    if (!dialog.open) return;
+    const properties = [...new Set(rows.flatMap(row => Object.keys(row.values)))].sort().slice(0, 120);
+    const form = toolNode("form");
+    const fields = toolNode("fieldset");
+    const filename = toolNode("input");
+    filename.placeholder = "Base name";
+    filename.setAttribute("aria-label", "Base name");
+    filename.required = true;
+    const columns = toolNode("select");
+    columns.multiple = true;
+    columns.size = 6;
+    columns.setAttribute("aria-label", "Visible columns");
+    const defaultColumns = new Set(preset?.columns || ["file.name"]);
+    const options = [["file.name", "Note"], ["file.path", "Path"], ["file.folder", "Folder"], ["file.ext", "Extension"],
+      ...properties.map(key => ["note." + key, key])];
+    for (const [key, label] of options) {
+      const option = toolNode("option", label);
+      option.value = key;
+      option.selected = defaultColumns.has(key);
+      columns.append(option);
+    }
+    const sort = toolSelect("Sort by", []);
+    const direction = toolSelect("Sort direction", [["asc", "Ascending"], ["desc", "Descending"]]);
+    direction.value = preset?.descending ? "desc" : "asc";
+    const scope = toolNode("input");
+    scope.type = "checkbox";
+    const scopeLabel = toolNode("label");
+    scopeLabel.append(scope, document.createTextNode(" Include only notes in this folder and its subfolders"));
+    const save = toolNode("button", "Create base");
+    save.type = "submit";
+    const close = dialog.querySelector("header button");
+    const selected = () => [...columns.selectedOptions].map(option => [option.value, option.textContent]);
+    columns.onchange = () => {
+      const previous = sort.value || preset?.sort;
+      const choices = selected();
+      sort.replaceChildren(...choices.map(([key, label]) => {
+        const option = toolNode("option", label);
+        option.value = key;
+        return option;
+      }));
+      if (choices.some(([key]) => key === previous)) sort.value = previous;
+      save.disabled = choices.length === 0;
+    };
+    columns.onchange();
+    const columnLabel = toolNode("label", "Visible columns");
+    columnLabel.append(columns);
+    fields.append(filename, columnLabel, sort, direction);
+    if (folder) fields.append(scopeLabel);
+    fields.append(save);
+    form.append(fields);
+    body.append(form);
+    filename.focus();
+    dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+    form.onsubmit = async event => {
+      event.preventDefault();
+      if (fields.disabled || save.disabled) return;
+      const name = filename.value.trim().replace(/\.base$/i, "");
+      if (!name || /[\\/]/.test(name)) { status("Enter a file name without a folder path."); return; }
+      const path = (folder ? folder + "/" : "") + name + ".base";
+      const config = { columns: selected().map(([key]) => key), sort: sort.value, descending: direction.value === "desc",
+        folder: folder && scope.checked ? folder : null };
+      fields.disabled = close.disabled = true;
+      status("");
+      try { await inv("create_vault_base", { path, config }); }
+      catch (error) {
+        status(errStr(error));
+        fields.disabled = close.disabled = false;
+        return;
+      }
+      dialog.close();
+      if (folder) unfold.add(folder);
+      lsTouch();
+      try { await refreshTree(); } catch (error) { say(errStr(error)); }
+      void toolOpenBase(path);
+    };
+  } catch (error) { status(errStr(error)); }
+}
+
+async function toolOpenBase(path) {
+  const { dialog, body, status } = toolDialog(path);
+  try {
+    await toolFlush();
+    const views = await inv("open_vault_base", { path });
+    if (!dialog.open) return;
+    const choose = toolSelect("Table view", views.map((view, index) => [String(index), view.title]));
+    choose.hidden = views.length === 1;
+    const filter = toolFilter("Filter this table");
+    const table = toolNode("table");
+    const head = table.createTHead().insertRow();
+    const data = table.createTBody();
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+    let sort = views[0].sort, descending = views[0].descending;
+    const value = (row, column) => {
+      if (column === "file.name") return row.name.split("/").pop();
+      if (column === "file.path") return row.name + ".md";
+      if (column === "file.folder") return row.name.slice(0, Math.max(0, row.name.lastIndexOf("/")));
+      if (column === "file.ext") return "md";
+      const key = column.slice("note.".length);
+      return Object.hasOwn(row.values, key) ? row.values[key] : "";
+    };
+    const render = () => {
+      const view = views[Number(choose.value)];
+      const query = filter.value.trim().toLocaleLowerCase();
+      const matches = view.rows.filter(row => view.columns.some(key => value(row, key).toLocaleLowerCase().includes(query)));
+      matches.sort((a, b) => (descending ? -1 : 1) * collator.compare(value(a, sort), value(b, sort)) || collator.compare(a.name, b.name));
+      const visible = matches.slice(0, view.limit ?? matches.length);
+      head.replaceChildren();
+      for (const key of view.columns) {
+        const cell = toolNode("th");
+        cell.scope = "col";
+        cell.setAttribute("aria-sort", key === sort ? (descending ? "descending" : "ascending") : "none");
+        const label = view.labels?.[key] ?? ({ "file.name": "Note", "file.path": "Path", "file.folder": "Folder", "file.ext": "Extension" }[key] ?? key.slice(5));
+        cell.append(toolButton(label, () => {
+          descending = sort === key ? !descending : false;
+          sort = key;
+          render();
+        }));
+        head.append(cell);
+      }
+      data.replaceChildren();
+      for (const row of visible) {
+        const item = data.insertRow();
+        view.columns.forEach((key, index) => {
+          const cell = item.insertCell();
+          const text = value(row, key);
+          if (index === 0) {
+            const link = toolButton(text || row.name, () => { dialog.close(); void openInTab(row.name); });
+            link.title = row.name;
+            cell.append(link);
+          } else cell.textContent = text;
+        });
+      }
+      status(visible.length ? `${visible.length} notes` : "No notes match.");
+    };
+    choose.onchange = () => {
+      const view = views[Number(choose.value)];
+      sort = view.sort;
+      descending = view.descending;
+      render();
+    };
+    filter.oninput = render;
+    body.append(filter, choose, table);
     render();
   } catch (error) { status(errStr(error)); }
 }

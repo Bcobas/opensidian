@@ -24,7 +24,7 @@ fn with_target<T>(
     vault.with_shell_path(&rel, |target, is_dir| {
         if let Action::OpenDefault = action {
             let ext = rel.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase();
-            let supported = matches!(ext.as_str(), "md" | "markdown" | "txt" | "pdf" | "canvas")
+            let supported = matches!(ext.as_str(), "md" | "markdown" | "txt" | "pdf" | "canvas" | "base")
                 || IMG_TYPES.iter().any(|(image, _)| *image == ext)
                 || media_mime(&ext).is_some();
             if is_dir || !supported {
