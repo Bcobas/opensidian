@@ -103,17 +103,52 @@ pub fn open_file(owner: HWND, path: &Path) -> Result<(), String> {
 pub fn copy_path(owner: HWND, path: &Path) -> ::windows::core::Result<()> {
     const CF_UNICODETEXT: u32 = 13;
     let path = wide_path(path);
+    let bytes = unsafe { std::slice::from_raw_parts(path.as_ptr().cast(), std::mem::size_of_val(path.as_slice())) };
+    copy_clipboard(owner, CF_UNICODETEXT, bytes)
+}
+
+pub fn graph_bitmap(payload: &[u8]) -> Result<Vec<u8>, String> {
+    const HEADER_BYTES: usize = 40; // BITMAPINFOHEADER
+    const MAX_PIXELS: usize = 16 * 1024 * 1024;
+    let Some((dimensions, pixels)) = payload.split_at_checked(8) else {
+        return Err("Invalid graph image".into());
+    };
+    let width = i32::from_le_bytes(dimensions[..4].try_into().unwrap());
+    let height = i32::from_le_bytes(dimensions[4..].try_into().unwrap());
+    if width <= 0 || height <= 0 || width as u64 * height as u64 > MAX_PIXELS as u64 ||
+        pixels.len() != width as usize * height as usize * 4 {
+        return Err("Invalid graph image dimensions or pixel data".into());
+    }
+    let mut dib = vec![0; HEADER_BYTES + pixels.len()];
+    dib[..4].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
+    dib[4..8].copy_from_slice(&width.to_le_bytes());
+    dib[8..12].copy_from_slice(&(-height).to_le_bytes()); // top-down, matching Canvas ImageData
+    dib[12..14].copy_from_slice(&1u16.to_le_bytes()); // planes
+    dib[14..16].copy_from_slice(&32u16.to_le_bytes()); // uncompressed BGRX
+    dib[20..24].copy_from_slice(&(pixels.len() as u32).to_le_bytes());
+    for (rgba, bgrx) in pixels.chunks_exact(4).zip(dib[HEADER_BYTES..].chunks_exact_mut(4)) {
+        bgrx[..3].copy_from_slice(&[rgba[2], rgba[1], rgba[0]]);
+    }
+    Ok(dib)
+}
+
+pub fn copy_bitmap(owner: HWND, bitmap: &[u8]) -> ::windows::core::Result<()> {
+    const CF_DIB: u32 = 8;
+    copy_clipboard(owner, CF_DIB, bitmap)
+}
+
+fn copy_clipboard(owner: HWND, format: u32, bytes: &[u8]) -> ::windows::core::Result<()> {
     unsafe {
-        let memory = GlobalAlloc(GMEM_MOVEABLE, std::mem::size_of_val(path.as_slice()))?;
+        let memory = GlobalAlloc(GMEM_MOVEABLE, bytes.len())?;
         let result = (|| {
-            let buffer = GlobalLock(memory).cast::<u16>();
+            let buffer = GlobalLock(memory).cast::<u8>();
             if buffer.is_null() {
                 return Err(Error::from_win32());
             }
-            std::ptr::copy_nonoverlapping(path.as_ptr(), buffer, path.len());
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len());
             let _ = GlobalUnlock(memory);
             OpenClipboard(Some(owner))?;
-            let result = EmptyClipboard().and_then(|()| SetClipboardData(CF_UNICODETEXT, Some(HANDLE(memory.0))));
+            let result = EmptyClipboard().and_then(|()| SetClipboardData(format, Some(HANDLE(memory.0))));
             let _ = CloseClipboard();
             result.map(|_| ())
         })();
@@ -122,6 +157,28 @@ pub fn copy_path(owner: HWND, path: &Path) -> ::windows::core::Result<()> {
             let _ = GlobalFree(Some(memory));
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encodes_a_top_down_dib_with_bgr_pixels() {
+        let payload = [1, 0, 0, 0, 2, 0, 0, 0, 10, 20, 30, 255, 40, 50, 60, 255];
+        let image = graph_bitmap(&payload).unwrap();
+        assert_eq!(&image[..8], &[40, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&image[8..12], &(-2i32).to_le_bytes());
+        assert_eq!(&image[12..16], &[1, 0, 32, 0]);
+        assert_eq!(&image[40..], &[30, 20, 10, 0, 60, 50, 40, 0]);
+    }
+
+    #[test]
+    fn rejects_truncated_or_oversized_images() {
+        assert!(graph_bitmap(&[0; 7]).is_err());
+        assert!(graph_bitmap(&[1, 0, 0, 0, 1, 0, 0, 0, 10]).is_err());
+        assert!(graph_bitmap(&[255, 255, 255, 127, 255, 255, 255, 127]).is_err());
     }
 }
 

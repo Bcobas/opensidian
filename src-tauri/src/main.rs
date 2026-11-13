@@ -1306,6 +1306,23 @@ async fn vault_file_action(window: tauri::Window, v: State<'_, Vault>, path: Str
     receive.recv().await.ok_or("The file action ended unexpectedly".to_owned())?
 }
 
+#[cfg(windows)]
+#[tauri::command]
+async fn copy_graph_screenshot(window: tauri::Window, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(pixels) = request.body() else {
+        return Err("Expected graph image pixels".into());
+    };
+    let bitmap = windows::graph_bitmap(pixels)?;
+    let (send, mut receive) = tauri::async_runtime::channel(1);
+    let owner = window.clone();
+    window.run_on_main_thread(move || {
+        let result = owner.hwnd().map_err(|error| error.to_string())
+            .and_then(|hwnd| windows::copy_bitmap(hwnd, &bitmap).map_err(|error| error.to_string()));
+        let _ = send.try_send(result);
+    }).map_err(|error| error.to_string())?;
+    receive.recv().await.ok_or("The clipboard request ended unexpectedly".to_owned())?
+}
+
 #[tauri::command]
 async fn save_package_as_vault(app: tauri::AppHandle, window: tauri::Window, name: String) -> Result<Option<String>, String> {
     #[cfg(windows)]
@@ -7040,6 +7057,7 @@ fn main() {
             #[cfg(windows)] preview_updated_package,
             #[cfg(windows)] save_updated_package,
             #[cfg(windows)] vault_file_action,
+            #[cfg(windows)] copy_graph_screenshot,
             #[cfg(windows)] vault_folder_action,
             #[cfg(windows)] copy_vault_folder,
             capture_web,

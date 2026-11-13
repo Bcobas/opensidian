@@ -4747,7 +4747,12 @@ function tabMenu(e, g, i, hdr) {
     item("Split right", () => { closeMenu(); splitGroup(g, "row", i); });
     item("Split down",  () => { closeMenu(); splitGroup(g, "col", i); });
     sep();
-    item("Copy screenshot", null, "Missing subsystem: canvas-to-clipboard — no programmatic clipboard write exists in this tree (ui/editor.js writes only inside real copy events) and the graph view has no canvas-to-PNG step");
+    const canCopy = windowsFileActions && (tab.kind === "gg" || tab.kind === "lg");
+    if (canCopy) focusableMenuRow(item("Copy screenshot", () => {
+      closeMenu();
+      void copyGraphScreenshot(g, tab);
+    }));
+    else item("Copy screenshot", null, "Available in the global and local graph on Windows");
     const pvn = pvNoteName(tab);          // issue-48: a board backed by a note bookmarks that note (STOCK.md S2/S3/S5)
     if (pvn) item(bmCache.includes(pvn) ? "Remove bookmark" : "Bookmark...", () => { closeMenu(); toggleBm(pvn); });
     else if (!hdr || tab.kind !== "lg")   // graphhdr REQ-10: Obsidian's LOCAL graph ⋮ has no Bookmark... row
@@ -10836,7 +10841,40 @@ const graphRendererPref = () => graphPrefP || (graphPrefP = inv("graph_renderer_
   const r = (p && p.renderer) || localStorage.getItem("opensidian.graphRenderer");
   return { renderer: r === "gl" || r === "2d" ? r : null, loseCtx: !!(p && p.lose_ctx), settleTrace: !!(p && p.settle_trace) };
 }));
+function graphScreenshot(overlay, base) {
+  const { width, height } = overlay;
+  if (!width || !height) throw new Error("The graph is not ready to copy.");
+  // Preserve the viewport aspect ratio while bounding the native clipboard payload.
+  const scale = Math.min(1, Math.sqrt(16 * 1024 * 1024 / (width * height)));
+  const frame = document.createElement("canvas");
+  frame.width = Math.max(1, Math.floor(width * scale));
+  frame.height = Math.max(1, Math.floor(height * scale));
+  const ctx = frame.getContext("2d", { alpha: false });
+  if (!ctx) throw new Error("Could not capture the graph.");
+  if (base) ctx.drawImage(base, 0, 0, frame.width, frame.height);
+  ctx.drawImage(overlay, 0, 0, frame.width, frame.height);
+  const pixels = ctx.getImageData(0, 0, frame.width, frame.height).data;
+  const payload = new Uint8Array(8 + pixels.length);
+  const dimensions = new DataView(payload.buffer);
+  dimensions.setInt32(0, frame.width, true);
+  dimensions.setInt32(4, frame.height, true);
+  payload.set(pixels, 8);
+  return payload;
+}
+
+async function copyGraphScreenshot(g, tab) {
+  try {
+    if (g.tabs[g.active] !== tab || !g.graphOn || !g.graphCapture) {
+      throw new Error("The graph is not ready to copy.");
+    }
+    // Binary IPC must bypass inv(), whose tracing merges arguments into a JSON object.
+    await TAURI.core.invoke("copy_graph_screenshot", g.graphCapture());
+    say("Graph image copied");
+  } catch (error) { say(errStr(error)); }
+}
+
 function showEditor(g) {
+  g.graphCapture = null;
   g.graphOn = false; g.graphRefresh = null; g.graphRedraw = null; g.graphAnimate = null; g.graphAnimState = null; g.graphRc = null; cancelAnimationFrame(g.sim); g.graphRenderer = null;
   if (g.ro) { g.ro.disconnect(); g.ro = null; }
   if (g.attrObs) { g.attrObs.disconnect(); g.attrObs = null; }
@@ -10861,6 +10899,7 @@ async function cmdGlobalGraph() {  // R9.7: ribbon icon opens GLOBAL graph as a 
   await loadActive(g);
 }
 async function startGraph(g, cfg) {
+  g.graphCapture = null;
   g.graphOn = true; g.graphSettled = false;
   if (!g.perfT0 && lgT0) g.perfT0 = lgT0;   // perfhunt: a local graph is opened from its SOURCE group; the split hands the click time over
   lgT0 = 0;
@@ -11660,6 +11699,11 @@ async function startGraph(g, cfg) {
   };
   const redraw = () => { dirty = true; wake(); };
   g.graphRedraw = () => { if (g.simGen === gen) redraw(); };   // graphctx: a group colour edit repaints, no refetch
+  g.graphCapture = () => {
+    // WebGL discards its drawing buffer after compositing. Read both layers in the same turn as draw().
+    draw();
+    return graphScreenshot(cv, glr ? g.glcv : null);
+  };
   g.graphAnimate = () => { if (g.simGen !== gen) return; animT0 = performance.now(); animPub = 0; g.reheat(1); updateTitle(); };   // GC26
   g.graphAnimState = () => g.simGen === gen ? { shown: animLast < 0 ? N.length : animLast, n: N.length, lab: animLab } : null;
   // THEME / PALETTE -> REPAINT (goal graphtheme). The loop stops once the sim is quiet (CPU -> 0),

@@ -62,6 +62,9 @@ jobs:
       - name: Test Windows file actions
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian file_actions::tests
+      - name: Test graph clipboard bitmap
+        working-directory: src-tauri
+        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian windows::tests
       - name: Test Windows folder actions
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian folder_actions::tests
