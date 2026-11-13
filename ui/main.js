@@ -370,6 +370,10 @@ async function rPanesRefresh() {
 }
 // Backlinks: "Linked mentions N" + one expandable row per linking note; the
 // matching lines show with the [[link]] highlighted; click opens the note
+function noteBacklinks(name) {
+  return Promise.all([inv("backlinks_ctx", { name }), cvBacklinks(name)]);
+}
+
 async function rBacklinks(n) {
   rbN++;                                  // [rpn:] — counted at ENTRY: the bug is calling it at all
   const box = $("bllist"), head = $("blhead");
@@ -377,7 +381,7 @@ async function rBacklinks(n) {
   // cv-vault CV-141: + the canvases whose file cards point at this note (fetched alongside, one await)
   // cvf-links CVR-A-097: a CANVAS (n = its .canvas path) is backlinked by the notes linking / embedding it
   const isCv = !!n && /\.canvas$/i.test(n);
-  const [bl, cvb] = !n ? [[], []] : isCv ? [await cvCanvasBacklinks(n), []] : await Promise.all([inv("backlinks_ctx", { name: n }), cvBacklinks(n)]);
+  const [bl, cvb] = !n ? [[], []] : isCv ? [await cvCanvasBacklinks(n), []] : await noteBacklinks(n);
   head.textContent = "Linked mentions"; rpInfo = "bl:" + (bl.length + cvb.length);
   const c = document.createElement("span");
   c.className = "scount"; c.textContent = bl.length + cvb.length; head.appendChild(c);
@@ -2370,6 +2374,7 @@ async function writeNote(name, content) {   // every save funnels here so graphs
   perf.mark("save", t0, { bytes: content.length });
 }
 async function afterWrite(name) {           // bookkeeping shared by write + create
+  scheduleDocumentBacklinks(name);
   markStale(name);                          // R20: inactive tabs on this note re-read on activation
   const fresh = !notesCache.includes(name);
   if (fresh) await refreshTree();           // R20: a NEW note is the only save that changes the tree
@@ -2576,6 +2581,7 @@ function mkView(g) {
   // R17: click below the last row (empty pane space) = caret at the end of
   // the note, like Obsidian; rows themselves get the native caret placement
   lp.addEventListener("mousedown", e => {
+    if (v.backlinks?.contains(e.target)) return;
     const g = v.g;
     /* R25.13f: a POINTER CLICK inside this editor is one of the three things
        that remove the search flash (the others are the next result click and
@@ -2624,6 +2630,83 @@ function dropView(t) {               // tab closed: its nodes go
   v.editor.remove(); v.lp.remove(); v.preview.remove();
   if (v.g && v.g.view === v) attachView(v.g, mkView(v.g));
   t.view = null;
+}
+
+let docBacklinksTimer = null;
+function scheduleDocumentBacklinks(changedNote) {
+  if (!groups().some(g => {
+    const tab = g.tabs[g.active];
+    return tab && !tab.kind && tab.backlinksInDocument && tab.name !== changedNote;
+  })) return;
+  clearTimeout(docBacklinksTimer);
+  docBacklinksTimer = setTimeout(() => {
+    for (const g of groups()) {
+      const tab = g.tabs[g.active];
+      if (tab && !tab.kind && tab.backlinksInDocument) void documentBacklinks(g, tab);
+    }
+  }, 200);
+}
+
+function mountDocumentBacklinks(g, tab) {
+  const view = tab.view;
+  if (!view || g.view !== view) return;
+  const host = tab.mode === "reading" ? view.preview : view.lp;
+  if (view.backlinks && view.backlinks.parentNode !== host) host.append(view.backlinks);
+}
+
+async function documentBacklinks(g, tab) {
+  const view = tab.view;
+  if (!view || g.view !== view || g.tabs[g.active] !== tab || tab.kind) return;
+  const request = view.backlinksRequest = (view.backlinksRequest || 0) + 1;
+  if (!tab.backlinksInDocument) {
+    view.backlinks?.remove();
+    view.backlinks = null;
+    return;
+  }
+  const name = tab.name;
+  if (!view.backlinks || view.backlinksNote !== name) {
+    view.backlinks?.remove();
+    view.backlinks = document.createElement("section");
+    view.backlinks.className = "document-backlinks";
+    view.backlinks.contentEditable = "false";
+    view.backlinks.setAttribute("aria-label", "Backlinks");
+    view.backlinks.textContent = "Loading backlinks…";
+    view.backlinksNote = name;
+  }
+  mountDocumentBacklinks(g, tab);
+  const current = () => view.backlinksRequest === request && view.g === g && g.view === view &&
+    g.tabs[g.active] === tab && !tab.kind && tab.name === name && tab.backlinksInDocument;
+  try {
+    const [notes, canvases] = await noteBacklinks(name);
+    if (!current()) return;
+    const count = notes.length + canvases.length;
+    const heading = document.createElement("h2");
+    heading.textContent = `Backlinks (${count})`;
+    const rows = document.createDocumentFragment();
+    const items = [
+      ...notes.map(note => ({ path: note.note, text: note.lines[0]?.[1], open: () => openNewTab(note.note, g) })),
+      ...canvases.map(canvas => ({ path: canvas.canvas, text: canvas.lines[0], open: () => openCanvas(canvas.canvas) }))
+    ];
+    for (const item of items) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.textContent = item.path;
+      if (item.text) {
+        const text = document.createElement("span");
+        text.textContent = item.text;
+        row.append(text);
+      }
+      row.onclick = () => {
+        focusGroup(g);
+        item.open().catch(error => say(errStr(error)));
+      };
+      rows.append(row);
+    }
+    if (!count) rEmpty(rows, "No backlinks found.");
+    view.backlinks.replaceChildren(heading, rows);
+  } catch (error) {
+    if (current()) view.backlinks.textContent = "Could not load backlinks: " + errStr(error);
+  }
 }
 function markStale(name) {           // a save of `name` -> every INACTIVE retained view of it re-reads on activation
   for (const h of groups()) for (const t of h.tabs)
@@ -2791,6 +2874,7 @@ function wsLeaf(t) {
   const st = t.read
     ? { file: wsPathOut(t.name), mode: "preview", source: !!t.src }
     : { file: wsPathOut(t.name), mode: "source", source: !!t.src };
+  if (t.backlinksInDocument) st.opensidianBacklinksInDocument = true;
   return { id: wsIdOf(t, "lid"), type: "leaf",
            state: { type: "markdown", state: st, icon: "lucide-file", title: titleOf(t.name) } };
 }
@@ -3056,6 +3140,7 @@ function wsTabIn(leaf, have) {
   // "reading" leaves the source bit alone) and would silently lose one bit.
   t.read = st.mode === "preview";
   t.src = st.source === true;
+  t.backlinksInDocument = st.opensidianBacklinksInDocument === true;
   if (typeof leaf.id === "string" && leaf.id) t.lid = leaf.id;   // R28.4: the id the file names is the id we keep
   wsRestored++;
   return t;
@@ -4672,7 +4757,13 @@ function tabMenu(e, g, i, hdr) {
   }
   // ---- group 2 (5 rows) ----
   if (!hdr) { pinRow(); linkRow(); }
-  item("Backlinks in document", null, "Missing subsystem: an in-document backlinks section, appended to the BOTTOM OF THE NOTE PANE; ours is a right-sidebar pane (R27), a different surface");
+  const backlinksRow = focusableMenuRow(item("Backlinks in document", () => {
+    closeMenu();
+    tab.backlinksInDocument = !tab.backlinksInDocument;
+    wsTouch();
+    void documentBacklinks(g, tab);
+  }, null, !!tab.backlinksInDocument));
+  backlinksRow.setAttribute("aria-pressed", String(!!tab.backlinksInDocument));
   item("Reading view", () => { closeMenu(); setMode(g, "reading"); }, null, tab.mode === "reading");     // WIRED: setMode (R38.10)
   item("Source mode",  () => { closeMenu(); setMode(g, "source"); },  null, tab.mode === "source");      // WIRED: setMode — the ✓ is the R12.4 radio, now a marker element
   // ---- group 3 (4 rows) ----
@@ -4759,11 +4850,16 @@ function ssScrollTo(cont, el, frac) {   // put `frac` into `el` at the top of `c
   const max = Math.max(0, cont.scrollHeight - cont.clientHeight);
   cont.scrollTop = Math.min(max, Math.max(0, cont.scrollTop + d));
 }
+function previewBlocks(g) {
+  const footer = g.view?.backlinks;
+  const children = g.preview.children;
+  return footer?.parentNode === g.preview ? [...children].filter(child => child !== footer) : children;
+}
 function ssAnchor(g) {   // the (fractional, 0-based) SOURCE LINE at the top of the CURRENT view, or null
   const t = g.active >= 0 ? g.tabs[g.active] : null;
   if (!t || t.kind || g.graphOn) return null;
   if (t.mode === "reading") {
-    const ch = g.preview.children, bl = g.pvLines;
+    const ch = previewBlocks(g), bl = g.pvLines;
     if (!ch.length || !bl || bl.length !== ch.length) return null;   // map out of step: no anchor beats a wrong one
     const [i, f] = ssTopOf(g.preview, ch);
     const a = bl[i] - 1, b = i + 1 < bl.length ? bl[i + 1] - 1 : a + 1;
@@ -4775,7 +4871,7 @@ function ssRestore(g, line) {   // scroll the CURRENT view so `line` is at the t
   const t = g.active >= 0 ? g.tabs[g.active] : null;
   if (!t || t.kind || line == null || g.graphOn) return;
   if (t.mode === "reading") {
-    const ch = g.preview.children, bl = g.pvLines;
+    const ch = previewBlocks(g), bl = g.pvLines;
     if (!ch.length || !bl || bl.length !== ch.length) return;
     let i = 0;
     while (i + 1 < bl.length && bl[i + 1] - 1 <= line) i++;
@@ -4977,6 +5073,8 @@ function applyMode(g, keep) {  // exactly ONE of lp / preview fills the pane
     }
     vkWatch(g);
   }
+  const tab = g.tabs[g.active];
+  if (tab && !tab.kind && tab.backlinksInDocument) mountDocumentBacklinks(g, tab);
   updateModeBtn(g);
 }
 function vkWatch(g) {   // modeswitch opt6: a pane width change drops the kept view (see applyMode)
@@ -5979,6 +6077,7 @@ async function loadActive(g) {
   attachView(g, v);
   showEditor(g);
   const n = curOf(g);
+  if (t?.backlinksInDocument) void documentBacklinks(g, t);
   setInlineTitle(v, n);              // #20: the rendered filename, before any body render
   if (n) mruTouch(n);                // m5: quick-switcher MRU order
   const m = t ? t.mode : "livepreview";
@@ -7095,7 +7194,14 @@ function extClick(e, a) {   // `a` unused: kept for the Ed.extClick(e, a) signat
 // opt2 observer counted that as a touch: every warm edit -> reading was a miss.
 // Only a style attribute on #preview ITSELF is ignored; any other record (a child,
 // a text, data-title, a class) still marks it dirty.
-const pvTouched = (P, recs) => recs.some(r => r.target !== P || r.type !== "attributes" || (r.attributeName !== "style" && r.attributeName !== "class"));   // opt6: + the vkeep class flip
+function pvTouched(P, records) {
+  return records.some(r => {
+    if (r.target.nodeType === 1 && r.target.closest(".document-backlinks")) return false;
+    if (r.target === P && r.type === "childList" && [...r.addedNodes, ...r.removedNodes]
+        .every(node => node.nodeType === 1 && node.classList.contains("document-backlinks"))) return false;
+    return r.target !== P || r.type !== "attributes" || (r.attributeName !== "style" && r.attributeName !== "class");
+  });
+}
 async function preview(g, sw) {   // sw: called by setMode (the edit -> reading switch)
   const src = g.editor.value, P = g.preview;
   // modeswitch opt2: the reading DOM is RETAINED while the pane shows the edit
@@ -7168,6 +7274,8 @@ async function preview(g, sw) {   // sw: called by setMode (the edit -> reading 
   // observer is armed, so their synchronous output is part of the retained DOM; async writes
   // later mark it dirty (the next switch re-renders). Not awaited: a slow plugin never holds the switch.
   if (PPOST) try { PPOST.run(P, curOf(g), g.active >= 0 ? g.tabs[g.active] : null, src, pvL).catch(e => console.error("[plugin] markdown processors:", e)); } catch (e) { console.error(e); }
+  const tab = g.tabs[g.active];
+  if (tab && g.preview === P && tab.backlinksInDocument) mountDocumentBacklinks(g, tab);
   // modeswitch opt2: arm the retained-DOM key. Our own innerHTML above is the
   // last write: drop its records synchronously, from here on any record = dirty.
   if (!P._pvObs) {
@@ -8126,7 +8234,7 @@ function cvDelete(p) {
    briefly and dropped on a tree refresh / canvas change, so a burst of panes reads the vault's canvases once. */
 var cvLM = null, cvLMt = 0;   // var: a pane may ask before this line runs
 var CV_LM_MAX = 500, CV_LM_TTL = 3000;
-function cvLinkDirty() { cvLM = null; }
+function cvLinkDirty() { cvLM = null; scheduleDocumentBacklinks(); }
 function cvLinkModel() {
   if (!CANVAS || !CANVAS.isRegistered()) return Promise.resolve([]);
   const now = Date.now();

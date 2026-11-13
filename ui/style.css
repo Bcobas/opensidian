@@ -732,6 +732,14 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
    docs/recon-rvcursor/; the operator ask is the requirement. */
 .preview { flex: 1 1 0; min-width: 0; overflow-y: auto; overflow-x: hidden;
            cursor: default }   /* R22 */
+.document-backlinks { margin-block: 2em 0; padding-block: 1em; border-top: 1px solid var(--border) }
+.document-backlinks h2 { margin: 0 0 .5em; font-size: 1em }
+.document-backlinks button { display: block; width: 100%; border: 0; padding: .4em .6em;
+                             border-radius: 4px; text-align: start; background: none;
+                             color: var(--accent-blue); font: inherit; overflow-wrap: anywhere; cursor: pointer }
+.document-backlinks button:hover { background: var(--bg-surface) }
+.document-backlinks button span { display: block; color: var(--text-chrome-muted);
+                                  font-size: .85em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 .standalone-reader { flex-direction: column }
 .reader-workspace {
   display: flex;
