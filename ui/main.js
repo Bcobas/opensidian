@@ -4221,12 +4221,12 @@ function pushTitle(t) {
   setTimeout(fin, 500);
 }
 
-function focusGroup(g) {
+function focusGroup(g, refreshRight = true) {
   const prev = state.focused;
   if (prev === g) return;
   state.focused = g;
   for (const x of groups()) x.pane.classList.toggle("focused", x === g);
-  rgFollow();                     // R9.6: right panel follows focus (fire+forget)
+  if (refreshRight) rgFollow();   // R9.6: right panel follows focus (fire+forget)
   updateTitle();
   if (prev) treeHighlight();      // explorer active-note highlight follows focus
 }
@@ -4521,6 +4521,26 @@ async function closeAllTabs(g) {           // Close all: a split pane goes with 
    both menus, so a row wired (or disabled with a reason) in one is the same in
    the other. Census: [mt:hdr-<kind>:<label>] names the pane's view. */
 function hdrMenu(e, g) { tabMenu(e, g, g.active, true); }
+async function openLinkedNoteView(g, tab, view) {
+  if (!groups().includes(g) || g.tabs[g.active] !== tab || tab.kind) return;
+  focusGroup(g, view === "lg");   // the selected note owns the view even when another pane was focused
+  if (view === "lg") return openLocalGraph(g);
+  await setRTab(view);
+  if (!rightOpen) await cmdToggleRight();
+}
+
+function focusableMenuRow(row) {
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.onkeydown = event => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    event.stopPropagation();
+    row.click();
+  };
+  return row;
+}
+
 function tabMenu(e, g, i, hdr) {
   e.preventDefault();
   closeMenu();
@@ -4562,6 +4582,28 @@ function tabMenu(e, g, i, hdr) {
     fill();
     setTimeout(() => clampMenu(m), 0);   // R22: the new list resizes the menu — re-clamp it
     updateTitle();                       // the menu was rebuilt in place -> refresh [menu:]
+  };
+  const pickLinkedView = () => {
+    const rows = [...m.children];
+    const scrollTop = m.scrollTop;
+    inPlace(() => {
+      m.scrollTop = 0;
+      const back = focusableMenuRow(item("Back to note menu", () => {
+        inPlace(() => {
+          m.append(...rows);
+          m.scrollTop = scrollTop;
+          linkedViewRow.focus({ preventScroll: true });
+        });
+      }));
+      sep();
+      for (const [label, view] of [["Local graph", "lg"], ["Backlinks", "bl"], ["Outgoing links", "out"], ["Outline", "toc"]]) {
+        focusableMenuRow(item(label, () => {
+          closeMenu();
+          openLinkedNoteView(g, tab, view).catch(error => say(errStr(error)));
+        }));
+      }
+      back.focus({ preventScroll: true });
+    });
   };
   const pick = () => inPlace(() => {     // R13.1/R38.8: every other open tab, in layout order
     let any = false;
@@ -4659,7 +4701,8 @@ function tabMenu(e, g, i, hdr) {
   sep();
   item("Open version history", () => { closeMenu(); void toolHistory(tab.name); });
   item("Export note with its files", () => { closeMenu(); void toolPortableExport(tab.name); });
-  item("Open linked view", null, "Missing subsystem: submenu panels in ctxmenu — four of its five children already have backends here (R7 local graph, backlinks, outgoing, outline), so this is the highest-value row in this list");
+  const linkedViewRow = focusableMenuRow(item("Open linked view", pickLinkedView));
+  linkedViewRow.classList.add("menu-next");
   // ---- group 8 (3 rows) ----
   sep();
   fileActionItem(item, "Open in default app", wsPathOut(tab.name), "open_default", tab.name);
@@ -11814,7 +11857,9 @@ function lgNoGraph(g) {                // true: the focused tab of g cannot be t
 }
 async function cmdLocalGraph() {       // R7.2: local graph of focused note -> new right split
   if (!state) return;
-  const g = fg();
+  return openLocalGraph(fg());
+}
+async function openLocalGraph(g) {
   const t0 = g.active >= 0 ? g.tabs[g.active] : null;
   const center = curOf(g);
   if (!center || lgNoGraph(g)) return;

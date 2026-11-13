@@ -970,6 +970,8 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
 .ctxmenu div { padding: 6px 14px; cursor: pointer; font-size: 13px;
                color: var(--text-chrome); white-space: nowrap }
 .ctxmenu div:hover { background: var(--border) }
+.ctxmenu div[role="button"]:focus-visible { background: var(--border); outline-offset: -2px }
+.ctxmenu .menu-next::after { content: "›"; float: right; margin-inline-start: 12px }
 /* bmmenu (docs/recon-bmmenu/README.md): the bookmark-row menu has separators and
    rows this tree cannot back. .sep is a real child so the census reads "---" where
    Obsidian draws a rule; .dis is the settings rows' disabled treatment (R30 note in
