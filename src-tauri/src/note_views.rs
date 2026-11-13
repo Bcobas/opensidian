@@ -79,7 +79,7 @@ pub fn row_from_properties(name: &str, properties: &yaml_rust2::yaml::Hash) -> R
     Row { name: name.to_owned(), values }
 }
 
-fn display(value: &Yaml) -> String {
+pub(crate) fn display(value: &Yaml) -> String {
     match value {
         Yaml::String(s) | Yaml::Real(s) => s.to_owned(),
         Yaml::Integer(n) => n.to_string(),

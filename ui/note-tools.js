@@ -379,6 +379,12 @@ async function toolCreateBase(folder, preset) {
     const sort = toolSelect("Sort by", []);
     const direction = toolSelect("Sort direction", [["asc", "Ascending"], ["desc", "Descending"]]);
     direction.value = preset?.descending ? "desc" : "asc";
+    const groupBy = toolSelect("Group by", [["", "No grouping"], ...options]);
+    const groupDirection = toolSelect("Group order", [["ASC", "Ascending"], ["DESC", "Descending"]]);
+    groupBy.onchange = () => { groupDirection.hidden = !groupBy.value; };
+    groupBy.onchange();
+    const groupLabel = toolNode("label", "Group by");
+    groupLabel.append(groupBy);
     const scope = toolNode("input");
     scope.type = "checkbox";
     const scopeLabel = toolNode("label");
@@ -442,7 +448,7 @@ async function toolCreateBase(folder, preset) {
     columns.onchange();
     const columnLabel = toolNode("label", "Visible columns");
     columnLabel.append(columns);
-    fields.append(filename, columnLabel, sort, direction);
+    fields.append(filename, columnLabel, sort, direction, groupLabel, groupDirection);
     if (folder) fields.append(scopeLabel);
     if (properties.length) fields.append(filters);
     fields.append(save);
@@ -457,7 +463,8 @@ async function toolCreateBase(folder, preset) {
       if (!name || /[\\/]/.test(name)) { status("Enter a file name without a folder path."); return; }
       const path = (folder ? folder + "/" : "") + name + ".base";
       const config = { columns: selected().map(([key]) => key), sort: sort.value, descending: direction.value === "desc",
-        folder: folder && scope.checked ? folder : null, conditions: conditions.map(read => read()) };
+        folder: folder && scope.checked ? folder : null, conditions: conditions.map(read => read()),
+        group_by: groupBy.value ? { property: groupBy.value, direction: groupDirection.value } : null };
       fields.disabled = close.disabled = true;
       status("");
       try { await inv("create_vault_base", { path, config }); }
@@ -486,7 +493,7 @@ async function toolOpenBase(path) {
     const filter = toolFilter("Filter this table");
     const table = toolNode("table");
     const head = table.createTHead().insertRow();
-    const data = table.createTBody();
+    const collapsed = new Set();
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     let sort = views[0].sort, descending = views[0].descending;
     const value = (row, column) => {
@@ -500,9 +507,6 @@ async function toolOpenBase(path) {
     const render = () => {
       const view = views[Number(choose.value)];
       const query = filter.value.trim().toLocaleLowerCase();
-      const matches = view.rows.filter(row => view.columns.some(key => value(row, key).toLocaleLowerCase().includes(query)));
-      matches.sort((a, b) => (descending ? -1 : 1) * collator.compare(value(a, sort), value(b, sort)) || collator.compare(a.name, b.name));
-      const visible = matches.slice(0, view.limit ?? matches.length);
       head.replaceChildren();
       for (const key of view.columns) {
         const cell = toolNode("th");
@@ -516,20 +520,49 @@ async function toolOpenBase(path) {
         }));
         head.append(cell);
       }
-      data.replaceChildren();
-      for (const row of visible) {
-        const item = data.insertRow();
-        view.columns.forEach((key, index) => {
-          const cell = item.insertCell();
-          const text = value(row, key);
-          if (index === 0) {
-            const link = toolButton(text || row.name, () => { dialog.close(); void openInTab(row.name); });
-            link.title = row.name;
-            cell.append(link);
-          } else cell.textContent = text;
-        });
+      while (table.tBodies.length) table.tBodies[0].remove();
+      let shown = 0;
+      for (const group of view.groups ?? [{ rows: view.rows }]) {
+        const matches = group.rows.filter(row => view.columns.some(key => value(row, key).toLocaleLowerCase().includes(query)));
+        matches.sort((a, b) => (descending ? -1 : 1) * collator.compare(value(a, sort), value(b, sort)) || collator.compare(a.name, b.name));
+        const visible = matches.slice(0, (view.limit ?? Infinity) - shown);
+        if (!visible.length && (query || group.rows.length)) continue;
+        shown += visible.length;
+        const data = table.createTBody();
+        const items = [];
+        if (view.groups) {
+          const heading = toolNode("th");
+          heading.scope = "rowgroup";
+          heading.colSpan = view.columns.length;
+          const label = `${group.label} (${visible.length})`;
+          if (visible.length) {
+            const toggle = toolButton(label, () => {
+              if (!collapsed.delete(group)) collapsed.add(group);
+              const expanded = !collapsed.has(group);
+              toggle.setAttribute("aria-expanded", String(expanded));
+              for (const item of items) item.hidden = !expanded;
+            });
+            toggle.setAttribute("aria-expanded", String(!collapsed.has(group)));
+            heading.append(toggle);
+          } else heading.textContent = label;
+          data.insertRow().append(heading);
+        }
+        for (const row of visible) {
+          const item = data.insertRow();
+          item.hidden = collapsed.has(group);
+          items.push(item);
+          view.columns.forEach((key, index) => {
+            const cell = item.insertCell();
+            const text = value(row, key);
+            if (index === 0) {
+              const link = toolButton(text || row.name, () => { dialog.close(); void openInTab(row.name); });
+              link.title = row.name;
+              cell.append(link);
+            } else cell.textContent = text;
+          });
+        }
       }
-      status(visible.length ? `${visible.length} notes` : "No notes match.");
+      status(shown ? `${shown} notes` : "No notes match.");
     };
     choose.onchange = () => {
       const view = views[Number(choose.value)];

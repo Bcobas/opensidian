@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,21 @@ pub struct NewBase {
     pub folder: Option<String>,
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    pub group_by: Option<GroupBy>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct GroupBy {
+    property: String,
+    direction: GroupDirection,
+}
+
+#[derive(Deserialize, Serialize)]
+enum GroupDirection {
+    #[serde(rename = "ASC")]
+    Ascending,
+    #[serde(rename = "DESC")]
+    Descending,
 }
 
 #[derive(Deserialize)]
@@ -84,7 +100,14 @@ pub struct Table {
     sort: String,
     descending: bool,
     limit: Option<usize>,
-    labels: std::collections::BTreeMap<String, String>,
+    labels: BTreeMap<String, String>,
+    rows: Vec<note_views::Row>,
+    groups: Option<Vec<TableGroup>>,
+}
+
+#[derive(Serialize)]
+struct TableGroup {
+    label: String,
     rows: Vec<note_views::Row>,
 }
 
@@ -140,13 +163,17 @@ pub fn create(root: &Path, path: &str, config: NewBase) -> Result<(), String> {
     }
     if config.conditions.len() > 16 { return Err("A base can save up to sixteen property conditions".into()); }
     for condition in config.conditions { filters.push(condition.expression()?); }
-    let base = serde_json::json!({
+    let mut base = serde_json::json!({
         "filters": { "and": filters },
         "views": [{
             "type": "table", "name": "Notes", "order": config.columns,
             "sort": [{ "property": config.sort, "direction": if config.descending { "DESC" } else { "ASC" } }]
         }]
     });
+    if let Some(group) = config.group_by {
+        if !column(&group.property) { return Err("Choose a supported grouping property".into()); }
+        base["views"][0]["groupBy"] = serde_json::to_value(group).map_err(|error| error.to_string())?;
+    }
     let bytes = serde_json::to_vec_pretty(&base).map_err(|error| error.to_string())?;
     if bytes.len() as u64 > MAX_BYTES { return Err("The base is too large".into()); }
     let vault = Vault::open(root).map_err(|error| error.to_string())?;
@@ -263,6 +290,101 @@ fn numeric(value: &Yaml) -> Option<f64> {
     }
 }
 
+fn group_key(value: &Yaml) -> Yaml {
+    if let Yaml::Real(_) = value {
+        if let Some(number) = numeric(value) {
+            let integer = number as i64;
+            if number < i64::MAX as f64 && integer as f64 == number {
+                return Yaml::Integer(integer);
+            }
+            return Yaml::Real(number.to_string());
+        }
+    }
+    value.clone()
+}
+
+fn group_value(name: &str, properties: &yaml_rust2::yaml::Hash, key: &str) -> Yaml {
+    let text = match key {
+        FILE_NAME => name.rsplit('/').next().unwrap_or(name).to_owned(),
+        "file.path" => format!("{name}.md"),
+        "file.folder" => name.rsplit_once('/').map_or("", |(folder, _)| folder).to_owned(),
+        "file.ext" => "md".to_owned(),
+        key => return group_key(properties.get(&Yaml::String(key["note.".len()..].into())).unwrap_or(&Yaml::Null)),
+    };
+    Yaml::String(text)
+}
+
+fn group_order(a: &Yaml, b: &Yaml) -> Ordering {
+    let rank = |value: &Yaml| match value {
+        Yaml::Boolean(_) => 0,
+        Yaml::Integer(_) | Yaml::Real(_) => 1,
+        Yaml::String(_) => 2,
+        _ => 3,
+    };
+    rank(a).cmp(&rank(b)).then_with(|| {
+        match (numeric(a), numeric(b)) {
+            (Some(a), Some(b)) => a.total_cmp(&b),
+            (a, b) => a.is_some().cmp(&b.is_some()),
+        }
+    }).then_with(|| a.cmp(b))
+}
+
+fn grouped_rows<'a>(
+    view: &Yaml,
+    docs: impl Iterator<Item = &'a (&'a str, note_views::Row, yaml_rust2::yaml::Hash)>,
+) -> Result<(Vec<note_views::Row>, Option<Vec<TableGroup>>), String> {
+    let by = &view["groupBy"];
+    let order = &view["groupOrder"];
+    if by.is_badvalue() {
+        if !order.is_badvalue() { return Err("Group order requires a grouping property".into()); }
+        return Ok((docs.map(|(_, row, _)| row.clone()).collect(), None));
+    }
+    let property = by["property"].as_str().ok_or("Invalid grouping property")?;
+    let property = if property.contains('.') { property.to_owned() } else { format!("note.{property}") };
+    if !column(&property) { return Err("Unsupported grouping property".into()); }
+    let descending = match by["direction"].as_str() {
+        Some("DESC") => true,
+        Some("ASC") => false,
+        None if by["direction"].is_badvalue() => false,
+        _ => return Err("Unsupported group direction".into()),
+    };
+    let mut buckets = BTreeMap::<_, Vec<_>>::new();
+    for (name, row, properties) in docs {
+        buckets.entry(group_value(name, properties, &property)).or_default().push(row.clone());
+    }
+    let groups = if order.is_badvalue() {
+        let mut groups: Vec<_> = buckets.into_iter().collect();
+        groups.sort_by(|(a, _), (b, _)| {
+            // Keep the group for notes with no value at the end in either direction.
+            a.is_null().cmp(&b.is_null()).then_with(|| {
+                if descending { group_order(b, a) } else { group_order(a, b) }
+            })
+        });
+        groups
+    } else {
+        let order = order.as_vec().ok_or("Invalid group order")?;
+        let mut seen = BTreeSet::new();
+        order.iter().map(group_key).filter_map(|key| {
+            seen.insert(key.clone()).then(|| {
+                let rows = buckets.remove(&key).unwrap_or_default();
+                (key, rows)
+            })
+        }).collect()
+    };
+    let groups = groups.into_iter().map(|(key, rows)| {
+        let label = match &key {
+            Yaml::Null => "(No value)".to_owned(),
+            Yaml::String(text) if text.is_empty() => "(Empty value)".to_owned(),
+            // Keep numeric and checkbox values distinguishable from their text equivalents.
+            Yaml::String(text) if numeric(&Yaml::from_str(text)).is_some()
+                || matches!(text.as_str(), "true" | "false" | "(No value)" | "(Empty value)") => format!("{text:?}"),
+            _ => note_views::display(&key),
+        };
+        TableGroup { label, rows }
+    }).collect();
+    Ok((Vec::new(), Some(groups)))
+}
+
 pub fn open(root: &Path, index: &Index, path: &str) -> Result<Vec<Table>, String> {
     let path = base_path(path)?;
     let vault = Vault::open(root).map_err(|error| error.to_string())?;
@@ -278,8 +400,8 @@ pub fn open(root: &Path, index: &Index, path: &str) -> Result<Vec<Table>, String
         global.matches(name, &properties).then(|| (name, note_views::row_from_properties(name, &properties), properties))
     }).collect();
     views.iter().filter(|view| view["type"].as_str() == Some("table")).map(|view| {
-        if ["groupBy", "summaries"].iter().any(|key| !view[*key].is_badvalue()) {
-            return Err("Grouping and summaries are not supported in base tables yet".into());
+        if !view["summaries"].is_badvalue() {
+            return Err("Summaries are not supported in base tables yet".into());
         }
         let mut columns = if view["order"].is_badvalue() {
             vec![FILE_NAME.to_owned()]
@@ -307,8 +429,8 @@ pub fn open(root: &Path, index: &Index, path: &str) -> Result<Vec<Table>, String
             }
         };
         let filter = Filter::parse(&view["filters"], 0)?;
-        let rows = docs.iter().filter(|(name, _, properties)| filter.matches(name, properties))
-            .map(|(_, row, _)| row.clone()).collect();
+        let matching = docs.iter().filter(|(name, _, properties)| filter.matches(name, properties));
+        let (rows, groups) = grouped_rows(view, matching)?;
         let limit = view["limit"].as_i64().and_then(|limit| usize::try_from(limit).ok());
         let labels = columns.iter().filter_map(|key| {
             let props = &base["properties"];
@@ -316,7 +438,7 @@ pub fn open(root: &Path, index: &Index, path: &str) -> Result<Vec<Table>, String
                 .or_else(|| key.strip_prefix("note.").and_then(|key| props[key]["displayName"].as_str()))?;
             Some((key.clone(), label.to_owned()))
         }).collect();
-        Ok(Table { title: view["name"].as_str().unwrap_or("Notes").to_owned(), columns, sort, descending, limit, labels, rows })
+        Ok(Table { title: view["name"].as_str().unwrap_or("Notes").to_owned(), columns, sort, descending, limit, labels, rows, groups })
     }).collect::<Result<Vec<_>, _>>().and_then(|tables| {
         if tables.is_empty() { Err("This base has no supported table view".into()) } else { Ok(tables) }
     })
@@ -338,7 +460,7 @@ mod tests {
         let _cleanup = Cleanup(root.clone());
         fs::write(root.join("Project/Sub/Alpha.md"), "---\npriority: 2\n---\n# Alpha").unwrap();
         fs::write(root.join("Other.md"), "# Other").unwrap();
-        let config = || NewBase { columns: vec![FILE_NAME.into(), "note.priority".into()], sort: "note.priority".into(), descending: true, folder: None, conditions: vec![] };
+        let config = || NewBase { columns: vec![FILE_NAME.into(), "note.priority".into()], sort: "note.priority".into(), descending: true, folder: None, conditions: vec![], group_by: None };
         create(&root, "Project/Work.base", config()).unwrap();
         let original = fs::read(root.join("Project/Work.base")).unwrap();
         assert!(create(&root, "Project/Work.base", config()).is_err());
@@ -380,6 +502,30 @@ mod tests {
         assert_eq!(serde_json::to_value(&table.rows[0]).unwrap()["name"], "Project/Ready");
         index.upsert("Project/Ready", "---\npriority: 2\n---\n");
         assert!(open(&root, &index, "Filtered.base").unwrap()[0].rows.is_empty());
+
+        create(&root, "Grouped.base", NewBase {
+            group_by: Some(GroupBy { property: "note.priority".into(), direction: GroupDirection::Descending }),
+            ..config()
+        }).unwrap();
+        let grouped = open(&root, &index, "Grouped.base").unwrap();
+        assert!(grouped[0].rows.is_empty());
+        let groups = grouped[0].groups.as_ref().unwrap();
+        assert_eq!(groups.iter().map(|group| group.label.as_str()).collect::<Vec<_>>(),
+            ["\"7\"", "9", "7", "2", "(No value)"]);
+        index.upsert("Project/Tied", "---\npriority: 7.0\n---\n");
+        let yaml = "views:\n  - type: table\n    filters: 'file.inFolder(\"Project\")'\n    groupBy: { property: priority, direction: ASC }\n    groupOrder: [null, 7, 7.0, Future]\n";
+        fs::write(root.join("Manual.base"), yaml).unwrap();
+        let manual = open(&root, &index, "Manual.base").unwrap();
+        let groups = manual[0].groups.as_ref().unwrap();
+        assert_eq!(groups.iter().map(|group| (group.label.as_str(), group.rows.len())).collect::<Vec<_>>(),
+            [("(No value)", 0), ("7", 2), ("Future", 0)]);
+        fs::write(root.join("Manual.base"), yaml.replace("[null, 7, 7.0, Future]", "[]")).unwrap();
+        assert!(open(&root, &index, "Manual.base").unwrap()[0].groups.as_ref().unwrap().is_empty());
+        fs::write(root.join("Manual.base"), yaml.replace("property: priority", "property: file.folder")
+            .replace("    groupOrder: [null, 7, 7.0, Future]\n", "")).unwrap();
+        let folders = open(&root, &index, "Manual.base").unwrap();
+        assert_eq!(folders[0].groups.as_ref().unwrap().iter().map(|group| group.label.as_str()).collect::<Vec<_>>(),
+            ["Project", "Project/Sub"]);
     }
 
     #[test]

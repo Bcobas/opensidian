@@ -844,6 +844,7 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
 .note-tool input + select { margin-inline-start: 0.5rem }
 .note-tool table { width: 100%; border-collapse: collapse; margin-top: 0.8rem; text-align: start }
 .note-tool th, .note-tool td { padding: 0.4rem; border-bottom: 1px solid var(--border); text-align: start; vertical-align: top }
+.note-tool th[scope="rowgroup"] { background: var(--bg-sidebar); white-space: pre-wrap; overflow-wrap: anywhere }
 .note-tool-list { list-style: none; padding: 0 }
 .note-tool-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin: 0.35rem 0 }
 .note-tool-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; margin-block: 0.8rem }
