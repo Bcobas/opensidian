@@ -1266,7 +1266,7 @@ function bmIndentTok() {
 const bmRenTok = () => (bmRenaming === null ? "" :
   " [bmren:" + String(($("bmren") && $("bmren").value) || "").replace(/[|\]]/g, "") + "]");
 function bmSync() {                        // the flat view every non-pane caller uses
-  bmCache = bmTree.filter(r => r.kind === "f" && !r.pdf).map(r => r.name);   // issue #44: a PDF row is no note name (== list_bookmarks)
+  bmCache = bmTree.filter(r => r.kind === "f" && !r.pdf && !r.target).map(r => r.name);
 }
 const BM_ICON_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h12v18l-6-4.5L6 21z"/></svg>';
 // a group row carries a CHEVRON where a file row carries its bookmark glyph, at
@@ -1323,7 +1323,7 @@ function renderBm() {
     }
     // a GROUP row opens nothing — a click on its chevron, label or row background
     // TOGGLES its fold (collapseall R1, M5 / recon-bmcollapse). A FILE row opens.
-    const open = e => (r.pdf ? openPdf(r.name, e) : rowOpen(r.name, e));   // issue #44: a PDF bookmark opens the PDF view
+    const open = e => openBookmark(r, e);
     row.onclick = grp ? () => { if (bmClickEaten()) return; bmFoldToggle(key); }
                       : e => { if (bmClickEaten()) return; open(e); };   // bmdrag: a drop's click opens nothing; opentab REQ-2/3/5/7
     if (!grp) row.onauxclick = e => { if (e.button === 1) { e.preventDefault(); open(e); } };   // opentab REQ-6
@@ -1694,18 +1694,26 @@ function bmRowMenu(e, nm, ix) {             // right-click a FILE .bmrow -> Obsi
   const hasGrp = bmTree.some(r => r.kind === "g");
   // issue #44 (PR #57 review): a painted PDF row is named by its vault PATH — its opens go through the PDF view,
   // never through a note tab (openNewTab/mkTab would read "<path>.md"); its Remove toggles that path (rust drops the Pdf node)
-  const pdf = !!(bmTree[ix] && bmTree[ix].pdf && bmTree[ix].name === nm);
-  item("Open in new tab",   () => (pdf ? openPdf(nm, null, "tab") : openNewTab(nm)));                         // WIRED: openNewTab — right of the active tab, focused, never deduped (opentab REQ-8/9/14, Obsidian c20)
-  item("Open to the right", () => (pdf ? openPdf(nm, null, "split") : splitWith(fg(), "row", mkTab(nm))));      // WIRED: splitWith — the verb behind the tab menu's "Split right" (M7/R6.2), carrying a fresh tab of this note
-  item("Open in new window", null, "Single-window app: there is no second window to open into");   // NOT WIRED
-  sep();
+  const row = bmTree[ix];
+  const pdf = !!row.pdf;
+  if (row.target !== "folder") {
+    item("Open in new tab", () => openBookmark(row, null, "tab"));
+    item("Open to the right", () => openBookmark(row, null, "split"));
+    item("Open in new window", null, "Single-window app: there is no second window to open into");
+    sep();
+  }
   item("Rename",  null, "Bookmarks are note names on disk (.obsidian/bookmarks.json); there is no per-bookmark title to rename");   // NOT WIRED
   item("Edit...", hasGrp ? () => openBmEdit(ix) : null,                    // WIRED (R4X.7) once a group exists: the move route, in and out
        hasGrp ? null : "Edit bookmark chooses a GROUP and this pane has none — right-click the pane background to create one");
   sep();
-  item("Reveal file in navigation", () => bmReveal(nm));                   // WIRED: bmReveal — setPane("files") + the explorer row's focus ring (R9.3 pane switch, treeRows)
+  item(row.target === "folder" ? "Reveal folder in navigation" : "Reveal file in navigation",
+       () => row.target ? revealBookmarkTarget(row) : bmReveal(nm));
   sep();
-  item("Remove", () => { if (pdf) toggleBm(nm, true); else if (bmCache.includes(nm)) toggleBm(nm); });   // WIRED: toggleBm — the same toggle the explorer-row / tab menus use (R9.4 / R20.4); guarded so it can only REMOVE. A PDF row removes its Pdf entry EXPLICITLY (pdf:true) so a same-named note bookmark ("x.pdf.md") is never the one dropped (PR #57 qodo High)
+  item("Remove", () => {
+    if (row.target) return bmApply("set_target_bookmark", { path: nm, kind: row.target, enabled: false });
+    if (pdf) return toggleBm(nm, true);
+    if (bmCache.includes(nm)) return toggleBm(nm);
+  });
   placeMenu(m, e.clientX, e.clientY);      // R22: viewport-clamped by measured size — the same seam as noteMenu/tabMenu
 }
 /* ---------- bmfolder: the GROUP-row menu, Obsidian 1.13.7's list ----------
@@ -1767,6 +1775,44 @@ function bmPaneMenu(e) {                   // right-click the pane BACKGROUND ->
    census publishes [bmrv:<name>] so a driver asserts the HANDLER ran, not merely
    that the Files pane is showing (it was showing before the click too). Cleared
    by the next pane switch (setPane) — the ring is a pointer, not a selection. */
+
+function openBookmark(row, event, how) {
+  if (row.target === "folder") return revealBookmarkTarget(row);
+  if (row.target === "canvas") {
+    if (CANVAS?.isRegistered() && ![...document.querySelectorAll("#tree .trow.cvfile")].some(el => el.dataset.canvas === row.name)) {
+      return say("Canvas not found: " + row.name);
+    }
+    return openCanvas(row.name, how);
+  }
+  if (row.pdf) return openPdf(row.name, event, how);
+  if (how === "tab") return openNewTab(row.name);
+  if (how === "split") return splitWith(fg(), "row", mkTab(row.name));
+  return rowOpen(row.name, event);
+}
+
+function targetBookmarkItem(item, path, kind) {
+  const enabled = !bmTree.some(row => row.target === kind && row.name === path);
+  item(enabled ? "Bookmark" : "Remove bookmark", () => bmApply("set_target_bookmark", { path, kind, enabled }));
+}
+
+async function revealBookmarkTarget(row) {
+  if (!sideOpen) await cmdToggleSide();
+  setPane("files");
+  const key = row.target === "folder" ? "folder" : "canvas";
+  const find = () => [...document.querySelectorAll("#tree .trow")].find(el => el.dataset[key] === row.name);
+  const target = find();
+  if (!target) { say("Bookmark target not found: " + row.name); return; }
+  const parts = row.name.split("/");
+  for (let depth = 1; depth < parts.length; depth++) unfold.add(parts.slice(0, depth).join("/"));
+  if (key === "folder") unfold.add(row.name);
+  lsTouch();
+  treeSig = "";
+  await refreshTree();
+  const visible = find();
+  if (visible) { visible.classList.add("revealed"); visible.scrollIntoView({ block: "nearest" }); }
+  revealInfo = visible ? row.name.replace(/[|\]:]/g, "") : "";
+  updateTitle();
+}
 
 function bmReveal(nm) {
   setPane("files");
@@ -1923,7 +1969,7 @@ function bmDragStart(e, ix) {
   // cv-dragin: the row as pressed (bmTree may repaint mid-drag), plus a group's painted file rows — CanvasDrop's
   // fallback when .obsidian/bookmarks.json cannot be read
   // issue #44 (PR #57 review): files are VAULT PATHS (a PDF row is named by its path, a note row by its name) and pdf flags a PDF row
-  const srcRow = { kind: src.kind, name: src.name, pdf: !!src.pdf, files: src.kind === "g" ? bmTree.slice(ix + 1, bmSubEnd(ix)).filter(r => r.kind === "f").map(r => (r.pdf ? r.name : r.name + ".md")) : [] };
+  const srcRow = { kind: src.kind, name: src.name, pdf: !!src.pdf, files: src.kind === "g" ? bmTree.slice(ix + 1, bmSubEnd(ix)).filter(r => r.kind === "f" && !r.target).map(r => (r.pdf ? r.name : r.name + ".md")) : [] };
   let ghost = null, fb = { line: null, hl: null }, srcEl = null, zones = null, raf = 0, last = null;
   let spring = 0;                          // collapseall R5: the armed spring-load timer
   let pz = null, pnd = null;               // issue #40: pane zones / the live pane decision (a FILE bookmark only)
@@ -1962,7 +2008,7 @@ function bmDragStart(e, ix) {
       ghost.textContent = label;
       document.body.appendChild(ghost);
       cacheZones();
-      if (src.kind === "f") pz = nDropZones();   // issue #40: a note bookmark can open on a pane
+      if (src.kind === "f" && !src.target) pz = nDropZones();   // issue #40: a note bookmark can open on a pane
       bmDropTok = "none";
       updateTitle();
     }
@@ -1971,7 +2017,7 @@ function bmDragStart(e, ix) {
     let nd = null;                         // {grp, parent, pos, y} | {cv}
     if (bmInPane(z, ev.clientX, ev.clientY)) {
       nd = bmDecide(z, ev.clientX, ev.clientY, ix);
-    } else if (window.CanvasDrop && typeof window.CanvasDrop.boardUnder === "function") {
+    } else if (!src.target && window.CanvasDrop && typeof window.CanvasDrop.boardUnder === "function") {
       // goal cv-dragin: outside the pane, an editable canvas board under the pointer is a target —
       // the release hands the bookmark to CanvasDrop.dropBookmark (no bmApply: bookmarks.json is untouched)
       const cvb = window.CanvasDrop.boardUnder(ev.clientX, ev.clientY);
@@ -8141,7 +8187,7 @@ function canvasFileMenu(e, p) {             // right-click a .canvas row in the 
     setTimeout(() => clampMenu(m), 0);
     updateTitle();
   };
-  item("Bookmark", null, "Bookmarks hold note names (.obsidian/bookmarks.json, R9.4); a canvas is not a note");
+  targetBookmarkItem(item, p, "canvas");
   sep();
   fileActionItem(item, "Copy path", p, "copy_path");
   sep();
@@ -8198,6 +8244,7 @@ async function cvRetarget(old, np) {
   try { await inv("canvas_io", { op: "rename", path: old, data: np }); }
   catch (err) { say(String(err && err.message || err), "canvas"); await refreshTree(); return false; }
   await refreshTree();
+  await refreshBm().catch(error => say(errStr(error), "canvas"));
   for (const l of ls) { try { await l.setViewState({ type: "canvas", state: Object.assign({}, l.view.getState(), { file: np }) }); } catch (err) { console.error("[canvas] retarget:", err); } }
   for (const h of groups()) renderTabs(h);
   updateTitle();
@@ -8847,7 +8894,7 @@ function folderMenuFull(item, sep, f) {
   item("Move folder to...", windowsFileActions ? () => folderActionDialog(dir, "move") : null, windowsFileActions ? null : "Available on Windows");
   item("Search in folder", windowsFileActions ? () => searchInFolder(dir) : null, windowsFileActions ? null : "Available on Windows");
   sep();
-  item("Bookmark", null, "Bookmarks hold note names (.obsidian/bookmarks.json, R9.4); a folder is not a note");
+  targetBookmarkItem(item, dir, "folder");
   fileActionItem(item, "Copy path", dir, "copy_path");
   sep();
   fileActionItem(item, "Show in system explorer", dir, "reveal");

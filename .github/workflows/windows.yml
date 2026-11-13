@@ -71,6 +71,9 @@ jobs:
       - name: Test Windows note merge
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_merge::tests
+      - name: Test folder and canvas bookmarks
+        working-directory: src-tauri
+        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian bookmark_folder_canvas_keep_paths_and_metadata
       - name: Test folder-scoped search
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian search_folder_scope_applies_before_the_result_limit

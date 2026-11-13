@@ -1141,7 +1141,19 @@ fn list_images(v: State<Vault>, otel: Option<perf::Ctx>) -> Vec<String> {
 #[tauri::command]
 fn canvas_io(v: State<Vault>, op: String, path: Option<String>, data: Option<String>, otel: Option<perf::Ctx>) -> Result<serde_json::Value, String> {
     let root = cur_vault(&v).ok_or("no vault open")?;
-    span_timed!(otel => "canvas_io", canvasfs::op(&root, &op, path.as_deref().unwrap_or(""), data.as_deref()))
+    let path = path.as_deref().unwrap_or("");
+    let _index = if op == "rename" { Some(v.index.lock().map_err(|error| error.to_string())?) } else { None };
+    let result = span_timed!(otel => "canvas_io", canvasfs::op(&root, &op, path, data.as_deref()))?;
+    if op == "rename" {
+        if let Some(to) = data.as_deref() {
+            if let Err(error) = retarget_bookmarks(&root, |kind, item| {
+                (kind == Some(BmTarget::Canvas) && item == path).then(|| to.to_owned())
+            }) {
+                eprintln!("[bookmarks] could not follow the canvas move: {error}");
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// canvas_attach (canvasfs::attach): a NEW png/jpg/jpeg/gif/webp file in the
@@ -4986,11 +4998,16 @@ enum BmNode {
     /// keeps its extension). Painted, and a click opens it in the PDF view; it
     /// is never a note NAME, so list_bookmarks and the rename walk skip it.
     Pdf { path: String, title: Option<String>, x: BmExtra },
+    Target { kind: BmTarget, path: String, title: Option<String>, x: BmExtra },
     Group { title: String, items: Vec<BmNode>, x: BmExtra },
     /// an entry our model cannot express — Obsidian's `search`, a non-.md path,
     /// a future type. Not painted, not addressable, written back verbatim.
     Opaque(serde_json::Value),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BmTarget { Folder, Canvas }
 
 impl BmNode {
     fn file(name: impl Into<String>) -> Self {
@@ -5023,6 +5040,8 @@ struct BmRow {
     /// issue #44: a PDF bookmark (`name` = its vault path, extension kept)
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pdf: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<BmTarget>,
 }
 
 /* the ONE parser, and it is TOLERANT by construction: a body that is not
@@ -5051,13 +5070,16 @@ fn bm_node_of(v: &serde_json::Value) -> BmNode {
     };
     let ctime = obj.get("ctime").and_then(|c| c.as_number()).cloned();
     match obj.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-        "file" => {
-            // Obsidian's `path` is our name + ".md" (recon §6); any other path
-            // (canvas, bare) is not expressible as an R9.4 name -> opaque; a
-            // `.pdf` path is a Pdf node (issue #44)
+        kind @ ("file" | "folder") => {
             let path = obj.get("path").and_then(|p| p.as_str()).unwrap_or("");
-            let name = path.strip_suffix(".md").filter(|n| !n.is_empty());
-            if name.is_none() && !(path.len() > 4 && is_pdf_target(path)) {
+            let target = if kind == "folder" {
+                safe_rel(path).map(|_| BmTarget::Folder)
+            } else {
+                safe_rel(path).filter(|p| p.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("canvas"))).map(|_| BmTarget::Canvas)
+            };
+            let name = if kind == "file" { path.strip_suffix(".md").filter(|n| !n.is_empty()) } else { None };
+            let pdf = kind == "file" && path.len() > 4 && is_pdf_target(path);
+            if name.is_none() && !pdf && target.is_none() {
                 return BmNode::Opaque(v.clone());
             }
             let title = obj.get("title").and_then(|t| t.as_str()).map(str::to_string);
@@ -5072,6 +5094,7 @@ fn bm_node_of(v: &serde_json::Value) -> BmNode {
                 .map(|(k, val)| (k.clone(), val.clone()))
                 .collect();
             let x = BmExtra { ctime, keys };
+            if let Some(kind) = target { return BmNode::Target { kind, path: path.to_string(), title, x }; }
             match name {
                 Some(n) => BmNode::File { name: n.to_string(), title, x },
                 None => BmNode::Pdf { path: path.to_string(), title, x },
@@ -5176,14 +5199,15 @@ fn bm_value_of(n: &BmNode) -> serde_json::Value {
     use serde_json::{Map, Value};
     match n {
         BmNode::Opaque(v) => v.clone(),
-        BmNode::File { title, x, .. } | BmNode::Pdf { title, x, .. } => {
+        BmNode::File { title, x, .. } | BmNode::Pdf { title, x, .. } | BmNode::Target { title, x, .. } => {
             let path = match n {
                 BmNode::File { name, .. } => format!("{name}.md"),
-                BmNode::Pdf { path, .. } => path.clone(),
+                BmNode::Pdf { path, .. } | BmNode::Target { path, .. } => path.clone(),
                 _ => unreachable!(),
             };
             let mut m = Map::new();
-            m.insert("type".into(), Value::String("file".into()));
+            let kind = if matches!(n, BmNode::Target { kind: BmTarget::Folder, .. }) { "folder" } else { "file" };
+            m.insert("type".into(), Value::String(kind.into()));
             if let Some(c) = &x.ctime {
                 m.insert("ctime".into(), Value::Number(c.clone()));
             }
@@ -5249,7 +5273,7 @@ fn bm_names(nodes: &[BmNode], out: &mut Vec<String>) {
         match n {
             BmNode::File { name, .. } => out.push(name.clone()),
             BmNode::Group { items, .. } => bm_names(items, out),
-            BmNode::Opaque(_) | BmNode::Pdf { .. } => {} // not a name — carried, not listed
+            BmNode::Opaque(_) | BmNode::Pdf { .. } | BmNode::Target { .. } => {}
         }
     }
 }
@@ -5278,7 +5302,7 @@ fn bm_rows_in(nodes: &[BmNode], depth: usize, out: &mut Vec<BmRow>) {
                 let label = title
                     .clone()
                     .unwrap_or_else(|| name.rsplit('/').next().unwrap_or(name).to_string());
-                out.push(BmRow { kind: "f".into(), depth, name: name.clone(), label, ctime: None, pdf: false });
+                out.push(BmRow { kind: "f".into(), depth, name: name.clone(), label, ctime: None, pdf: false, target: None });
             }
             BmNode::Pdf { path, title, .. } => {
                 // issue #44: `name` is the vault path the click opens in the PDF view
@@ -5287,11 +5311,16 @@ fn bm_rows_in(nodes: &[BmNode], depth: usize, out: &mut Vec<BmRow>) {
                     .clone()
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path).to_string());
-                out.push(BmRow { kind: "f".into(), depth, name: path.clone(), label, ctime: None, pdf: true });
+                out.push(BmRow { kind: "f".into(), depth, name: path.clone(), label, ctime: None, pdf: true, target: None });
+            }
+            BmNode::Target { kind, path, title, .. } => {
+                let label = title.clone().filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path).to_string());
+                out.push(BmRow { kind: "f".into(), depth, name: path.clone(), label, ctime: None, pdf: false, target: Some(*kind) });
             }
             BmNode::Group { title, items, x } => {
                 let ctime = x.ctime.as_ref().map(|c| c.to_string());
-                out.push(BmRow { kind: "g".into(), depth, name: title.clone(), label: title.clone(), ctime, pdf: false });
+                out.push(BmRow { kind: "g".into(), depth, name: title.clone(), label: title.clone(), ctime, pdf: false, target: None });
                 bm_rows_in(items, depth + 1, out);
             }
             BmNode::Opaque(_) => {} // preserved on disk, never painted
@@ -5654,26 +5683,72 @@ fn rename_bookmark_in(root: &Path, old: &str, new: &str) {
 
 #[cfg(windows)]
 fn move_folder_bookmarks(root: &Path, from: &str, to: &str) -> Result<(), String> {
-    fn remap(nodes: &mut [BmNode], from: &str, to: &str) -> bool {
+    retarget_bookmarks(root, |kind, name| {
+        if kind == Some(BmTarget::Folder) && name == from.trim_end_matches('/') {
+            return Some(to.trim_end_matches('/').to_owned());
+        }
+        name.strip_prefix(from).map(|suffix| format!("{to}{suffix}"))
+    })
+}
+
+fn retarget_bookmarks(root: &Path, update: impl Fn(Option<BmTarget>, &str) -> Option<String>) -> Result<(), String> {
+    fn remap(nodes: &mut [BmNode], update: &impl Fn(Option<BmTarget>, &str) -> Option<String>) -> bool {
         let mut changed = false;
         for node in nodes {
-            match node {
-                BmNode::File { name, .. } | BmNode::Pdf { path: name, .. } => {
-                    if let Some(suffix) = name.strip_prefix(from) {
-                        *name = format!("{to}{suffix}");
-                        changed = true;
-                    }
-                }
-                BmNode::Group { items, .. } => changed |= remap(items, from, to),
-                BmNode::Opaque(_) => {}
+            let (kind, path) = match node {
+                BmNode::File { name, .. } | BmNode::Pdf { path: name, .. } => (None, name),
+                BmNode::Target { kind, path, .. } => (Some(*kind), path),
+                BmNode::Group { items, .. } => { changed |= remap(items, update); continue; }
+                BmNode::Opaque(_) => continue,
+            };
+            if let Some(next) = update(kind, path) {
+                *path = next;
+                changed = true;
             }
         }
         changed
     }
     if !root.join(BM_FILE).is_file() { return Ok(()); }
     let mut tree = read_bm_tree(root);
-    if remap(&mut tree, from, to) { write_bm_tree(root, &tree)?; }
+    if remap(&mut tree, &update) { write_bm_tree(root, &tree)?; }
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn bookmark_folder_canvas_keep_paths_and_metadata() {
+    let root = std::env::temp_dir().join(format!("opensidian-bm-target-{}", opensidian_lib::os_random_hex().unwrap()));
+    fs::create_dir_all(root.join("Projects")).unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    }
+    let _cleanup = Cleanup(root.clone());
+    fs::write(root.join("Projects/Map.canvas"), "{}").unwrap();
+    write_bookmarks(&root, &["Projects".into(), "Projects/Map.canvas".into()]).unwrap();
+    assert!(set_target_bookmark_in(&root, "../Projects", BmTarget::Folder, true).is_err());
+    assert!(set_target_bookmark_in(&root, "Projects", BmTarget::Canvas, true).is_err());
+    assert!(set_target_bookmark_in(&root, "Projects/Missing.canvas", BmTarget::Canvas, true).is_err());
+
+    let rows = set_target_bookmark_in(&root, "Projects", BmTarget::Folder, true).unwrap();
+    assert_eq!(rows[2].target, Some(BmTarget::Folder));
+    let rows = set_target_bookmark_in(&root, "Projects/Map.canvas", BmTarget::Canvas, true).unwrap();
+    assert_eq!(rows[3].target, Some(BmTarget::Canvas));
+    assert_eq!(set_target_bookmark_in(&root, "Projects/Map.canvas", BmTarget::Canvas, true).unwrap(), rows);
+
+    let mut tree = read_bm_tree(&root);
+    bm_group_new_in(&mut tree, None).unwrap();
+    bm_move_in_tree(&mut tree, 3, Some(4)).unwrap();
+    write_bm_tree(&root, &tree).unwrap();
+    retarget_bookmarks(&root, |kind, path| {
+        (kind == Some(BmTarget::Canvas) && path == "Projects/Map.canvas").then(|| "Projects/New.canvas".into())
+    }).unwrap();
+    let rows = bm_rows_of(&read_bm_tree(&root));
+    assert_eq!((rows[4].name.as_str(), rows[4].depth), ("Projects/New.canvas", 1));
+    assert_eq!(read_bookmarks(&root), ["Projects", "Projects/Map.canvas"]);
+    let rows = set_target_bookmark_in(&root, "Projects/New.canvas", BmTarget::Canvas, false).unwrap();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[2].target, Some(BmTarget::Folder));
 }
 
 /* R4X.4 (criterion 5) — IN PLACE, wherever the entry SITS: the payload of the
@@ -5699,7 +5774,7 @@ fn bm_rename_walk(tree: &mut Vec<BmNode>, old: &str, new: &str) -> bool {
                     }
                 }
                 BmNode::Group { items, .. } => walk(items, old, new, done),
-                BmNode::Opaque(_) | BmNode::Pdf { .. } => {} // not a name; never followed, never dropped
+                BmNode::Opaque(_) | BmNode::Pdf { .. } | BmNode::Target { .. } => {}
             }
             if drop {
                 nodes.remove(i);
@@ -5771,6 +5846,7 @@ fn bookmark_rows(v: State<Vault>) -> Vec<BmRow> {
 fn toggle_bookmark(v: State<Vault>, name: String, pdf: Option<bool>) -> Result<Vec<String>, String> {
     span_timed!("toggle_bookmark", {
         let root = cur_vault(&v).ok_or("no vault open")?;
+        let _index = v.index.lock().map_err(|error| error.to_string())?;
         let mut tree = read_bm_tree(&root);
         // issue #44 (PR #57 review, qodo High on 340c2fb): a PDF row's Remove says so explicitly
         // (`pdf: true`) and drops ONLY the Pdf node with that path — a note bookmark of the same
@@ -5788,12 +5864,65 @@ fn toggle_bookmark(v: State<Vault>, name: String, pdf: Option<bool>) -> Result<V
     })
 }
 
+fn set_target_bookmark_in(root: &Path, name: &str, kind: BmTarget, enabled: bool) -> Result<Vec<BmRow>, String> {
+    let rel = safe_rel(name).ok_or("Invalid bookmark path")?;
+    let path = opensidian_lib::vault_path_string(&rel);
+    if enabled {
+        let fs = vaultfs::Vault::open(root).map_err(|error| error.to_string())?;
+        let stat = fs.p_stat(&rel).map_err(|error| error.to_string())?;
+        let valid = match kind {
+            BmTarget::Folder => stat.kind == "folder",
+            BmTarget::Canvas => stat.kind == "file" && rel.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("canvas")),
+        };
+        if !valid { return Err("The selected bookmark target is unavailable".into()); }
+    }
+
+    fn matching(node: &BmNode, path: &str, kind: BmTarget) -> bool {
+        matches!(node, BmNode::Target { kind: k, path: p, .. } if *k == kind && p == path)
+    }
+    fn contains(nodes: &[BmNode], path: &str, kind: BmTarget) -> bool {
+        nodes.iter().any(|node| matching(node, path, kind) ||
+            matches!(node, BmNode::Group { items, .. } if contains(items, path, kind)))
+    }
+    fn remove(nodes: &mut Vec<BmNode>, path: &str, kind: BmTarget) -> bool {
+        for i in 0..nodes.len() {
+            if matching(&nodes[i], path, kind) {
+                nodes.remove(i);
+                return true;
+            }
+            if let BmNode::Group { items, .. } = &mut nodes[i] {
+                if remove(items, path, kind) { return true; }
+            }
+        }
+        false
+    }
+    let mut tree = read_bm_tree(root);
+    let changed = if enabled {
+        if contains(&tree, &path, kind) { false } else {
+            tree.push(BmNode::Target { kind, path, title: None, x: BmExtra::now() });
+            true
+        }
+    } else {
+        remove(&mut tree, &path, kind)
+    };
+    if changed { write_bm_tree(root, &tree)?; }
+    Ok(bm_rows_of(&tree))
+}
+
+#[tauri::command]
+fn set_target_bookmark(v: State<Vault>, path: String, kind: BmTarget, enabled: bool) -> Result<Vec<BmRow>, String> {
+    let root = cur_vault(&v).ok_or("no vault open")?;
+    let _index = v.index.lock().map_err(|error| error.to_string())?;
+    set_target_bookmark_in(&root, &path, kind, enabled)
+}
+
 /* every structural command is the same three steps — read the tree, mutate it
    BY ROW INDEX, write it through the one serializer — and each returns the new
    painted vector, so the UI repaints what the FILE says instead of its own
    guess about what its click did. */
 fn bm_apply(v: &State<Vault>, f: impl FnOnce(&mut Vec<BmNode>) -> Result<(), String>) -> Result<Vec<BmRow>, String> {
     let root = cur_vault(v).ok_or("no vault open")?;
+    let _index = v.index.lock().map_err(|error| error.to_string())?;
     let mut tree = read_bm_tree(&root);
     f(&mut tree)?;
     write_bm_tree(&root, &tree)?;
@@ -7062,7 +7191,7 @@ fn main() {
             #[cfg(windows)] copy_vault_folder,
             capture_web,
             create_vault, create_vault_dir, open_vault_window, switch_show, switch_ready, boot_notice, home_dir, list_dirs, list_folders, create_dir, backlinks, search,
-            list_bookmarks, toggle_bookmark, bookmark_rows, bm_group_new, bm_group_rename, bm_group_delete, bm_move, bm_add, bm_drag, bm_add_at, recent_vaults, rename_note, media_rename, media_read, move_note, update_links, delete_note, link_consent, set_link_consent, strict_line_breaks, set_strict_line_breaks, qs_new_name, readable_line_length, graph_settings, set_graph_settings, tags, tag_counts,
+            list_bookmarks, toggle_bookmark, set_target_bookmark, bookmark_rows, bm_group_new, bm_group_rename, bm_group_delete, bm_move, bm_add, bm_drag, bm_add_at, recent_vaults, rename_note, media_rename, media_read, move_note, update_links, delete_note, link_consent, set_link_consent, strict_line_breaks, set_strict_line_breaks, qs_new_name, readable_line_length, graph_settings, set_graph_settings, tags, tag_counts,
             get_sidebar_w, set_sidebar_w, log_spans, graph_renderer_pref, type_probe, nob_probe, psg_probe, vb_probe, smoke_css,
             read_workspace, write_workspace,
             outline, outgoing, backlinks_ctx, unlinked_mentions, link_mention, get_rside_tab, set_rside_tab, vault_id, ls_get, ls_set, get_theme, set_theme,
@@ -8881,7 +9010,7 @@ mod tests {
             root.join(BM_FILE),
             r#"{"items": [
                 {"type": "search", "ctime": 1789851600000, "query": "tag:#recon"},
-                {"type": "file", "ctime": 7, "path": "Diagram.canvas"},
+                {"type": "file", "ctime": 7, "path": "Diagram.svg"},
                 {"type": "file", "ctime": 9, "path": "Plain.md"}
             ]}"#,
         )
@@ -8898,10 +9027,10 @@ mod tests {
         write_bm_tree(&root, &t).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bm_bytes(&root)).unwrap();
         let items = v["items"].as_array().unwrap();
-        assert_eq!(items.len(), 2, "search + canvas survived: {items:?}");
+        assert_eq!(items.len(), 2, "search + unsupported attachment survived: {items:?}");
         assert_eq!(items[0]["query"], "tag:#recon");
         assert_eq!(items[0]["ctime"], serde_json::json!(1789851600000u64), "ctime included");
-        assert_eq!(items[1]["path"], "Diagram.canvas");
+        assert_eq!(items[1]["path"], "Diagram.svg");
         let _ = fs::remove_dir_all(&root);
     }
 

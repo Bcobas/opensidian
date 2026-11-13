@@ -183,7 +183,9 @@ mod tests {
             "type": "group", "ctime": 10, "title": "Work", "items": [
                 {"type": "file", "ctime": 20, "path": "Café/sub/Plan.md", "title": "Plan", "custom": 1},
                 {"type": "file", "ctime": 21, "path": "Café/sub/Guide.pdf"},
-                {"type": "file", "ctime": 22, "path": "Café.md"}
+                {"type": "file", "ctime": 22, "path": "Café.md"},
+                {"type": "folder", "ctime": 23, "path": "Café", "title": "Project folder"},
+                {"type": "file", "ctime": 24, "path": "Café/sub/Diagram.canvas"}
             ]
         }] });
         fs::write(&bookmarks, original.to_string()).unwrap();
@@ -194,6 +196,8 @@ mod tests {
         let mut expected = original;
         expected["items"][0]["items"][0]["path"] = "Renamed/sub/Plan.md".into();
         expected["items"][0]["items"][1]["path"] = "Renamed/sub/Guide.pdf".into();
+        expected["items"][0]["items"][3]["path"] = "Renamed".into();
+        expected["items"][0]["items"][4]["path"] = "Renamed/sub/Diagram.canvas".into();
         assert_eq!(actual, expected);
     }
 
