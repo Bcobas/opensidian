@@ -509,10 +509,83 @@ async function toolCreateBase(folder, preset) {
 
 function baseViewPropertyOptions(base, view) {
   const properties = new Set(base.properties);
-  for (const key of [...view.columns, view.group_by?.property, ...view.sort.map(rule => rule.property)]) {
+  for (const key of [...view.columns, ...Object.keys(view.labels ?? {}), view.group_by?.property, ...view.sort.map(rule => rule.property)]) {
     if (key?.startsWith("note.")) properties.add(key.slice(5));
   }
   return basePropertyOptions([...properties].sort()).map(([key, name]) => [key, view.labels?.[key] ?? name]);
+}
+
+function toolEditBaseColumns(base, view, write) {
+  const { dialog, body, status } = toolDialog("Edit columns · " + view.title);
+  const options = new Map(baseViewPropertyOptions(base, view));
+  const columns = [...view.columns];
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const shown = toolSelect("Visible columns in display order", []);
+  shown.size = 6;
+  const shownLabel = toolNode("label", "Visible columns");
+  shownLabel.append(shown);
+  const available = toolSelect("Available columns", []);
+  const add = toolButton("Add column", () => {
+    if (!available.value || columns.length >= 128) return;
+    columns.push(available.value);
+    refresh(columns.length - 1);
+    shown.focus();
+  });
+  const move = offset => {
+    const index = Number(shown.value);
+    const next = index + offset;
+    [columns[index], columns[next]] = [columns[next], columns[index]];
+    refresh(next);
+    shown.focus();
+  };
+  const up = toolButton("Move up", () => move(-1));
+  const down = toolButton("Move down", () => move(1));
+  const remove = toolButton("Hide column", () => {
+    const index = Number(shown.value);
+    columns.splice(index, 1);
+    refresh(Math.min(index, columns.length - 1));
+    shown.focus();
+  });
+  const option = (value, name) => Object.assign(toolNode("option", name), { value });
+  const updateControls = () => {
+    const index = Number(shown.value);
+    up.disabled = index === 0;
+    down.disabled = index === columns.length - 1;
+    remove.disabled = columns.length === 1;
+    add.disabled = !available.value || columns.length >= 128;
+  };
+  function refresh(index) {
+    shown.replaceChildren(...columns.map((key, i) => option(String(i), options.get(key))));
+    shown.value = String(index);
+    const used = new Set(columns);
+    available.replaceChildren(option("", "Choose a property"),
+      ...[...options].filter(([key]) => !used.has(key)).map(([key, name]) => option(key, name)));
+    available.value = "";
+    updateControls();
+  }
+  shown.onchange = available.onchange = updateControls;
+  refresh(0);
+  const save = toolNode("button", "Save columns");
+  save.type = "submit";
+  const close = dialog.querySelector("header button");
+  const picker = toolNode("div");
+  picker.append(available, add);
+  fields.append(shownLabel, up, down, remove, picker, save);
+  form.append(fields);
+  body.append(toolNode("p", "Saving a change rewrites the YAML formatting and removes comments."), form);
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    fields.disabled = close.disabled = true;
+    status("");
+    try { await write(columns); dialog.close(); }
+    catch (error) {
+      status(errStr(error));
+      fields.disabled = close.disabled = false;
+    }
+  };
 }
 
 function toolEditBaseSorting(base, view, write) {
@@ -677,7 +750,7 @@ async function toolOpenBase(path) {
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     const activeView = () => base.views[Number(choose.value)];
     const defaultSort = view => view.sort.length ? view.sort : [{ property: view.columns[0], direction: "ASC" }];
-    let sort = defaultSort(activeView());
+    let sortOverride = null;
     let results = [];
     const edit = toolButton("Edit grouping", () => {
       const view = activeView();
@@ -691,7 +764,15 @@ async function toolOpenBase(path) {
       const view = activeView();
       toolEditBaseSorting(base, view, async rules => {
         base = await inv("set_vault_base_sorting", { path, revision: base.revision, id: view.id, sort: rules });
-        sort = defaultSort(activeView());
+        sortOverride = null;
+        collapsed.clear();
+        render();
+      });
+    });
+    const editColumns = toolButton("Edit columns", () => {
+      const view = activeView();
+      toolEditBaseColumns(base, view, async columns => {
+        base = await inv("set_vault_base_columns", { path, revision: base.revision, id: view.id, columns });
         collapsed.clear();
         render();
       });
@@ -712,6 +793,7 @@ async function toolOpenBase(path) {
     });
     const render = () => {
       const view = activeView();
+      const sort = sortOverride ?? defaultSort(view);
       const query = filter.value.trim().toLocaleLowerCase();
       results = [];
       head.replaceChildren();
@@ -722,7 +804,7 @@ async function toolOpenBase(path) {
         cell.setAttribute("aria-sort", key === primary.property ? (primary.direction === "DESC" ? "descending" : "ascending") : "none");
         cell.append(toolButton(label(view, key), () => {
           const direction = primary.property === key && primary.direction === "ASC" ? "DESC" : "ASC";
-          sort = [{ property: key, direction }, ...sort.filter(rule => rule.property !== key)];
+          sortOverride = [{ property: key, direction }, ...sort.filter(rule => rule.property !== key)];
           render();
         }));
         head.append(cell);
@@ -777,11 +859,11 @@ async function toolOpenBase(path) {
       status(results.length ? `${results.length} notes` : "No notes match.");
     };
     choose.onchange = () => {
-      sort = defaultSort(activeView());
+      sortOverride = null;
       render();
     };
     filter.oninput = render;
-    body.append(filter, choose, edit, editSort, exportCsv, table);
+    body.append(filter, choose, edit, editSort, editColumns, exportCsv, table);
     render();
   } catch (error) { status(errStr(error)); }
 }

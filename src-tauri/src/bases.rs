@@ -13,6 +13,7 @@ use crate::{note_views, safe_rel, vaultfs::Vault, Index};
 
 const MAX_BYTES: u64 = 128 * 1024;
 const MAX_CSV_BYTES: usize = 32 * 1024 * 1024;
+const MAX_COLUMNS: usize = 128;
 const FILE_NAME: &str = "file.name";
 
 #[derive(Deserialize)]
@@ -132,6 +133,26 @@ fn column(key: &str) -> bool {
         key.strip_prefix("note.").is_some_and(|name| !name.trim().is_empty())
 }
 
+fn view_columns(view: &Yaml) -> Result<Vec<String>, String> {
+    let order = &view["order"];
+    if order.is_badvalue() { return Ok(vec![FILE_NAME.into()]); }
+    let order = order.as_vec().filter(|order| order.len() <= MAX_COLUMNS).ok_or("Invalid table column order")?;
+    if order.is_empty() { return Ok(vec![FILE_NAME.into()]); }
+    order.iter().map(|value| {
+        let key = value.as_str().ok_or("Invalid table column")?;
+        let key = property_key(key);
+        column(&key).then_some(key).ok_or_else(|| "This base uses an unsupported column".into())
+    }).collect()
+}
+
+fn property_key(key: &str) -> String {
+    if ["file.", "formula.", "note."].iter().any(|prefix| key.starts_with(prefix)) {
+        key.to_owned()
+    } else {
+        format!("note.{key}")
+    }
+}
+
 fn base_path(path: &str) -> Result<PathBuf, String> {
     safe_rel(path).filter(|rel| is_base(rel)).ok_or_else(|| "Invalid .base path".into())
 }
@@ -144,7 +165,7 @@ pub enum CsvSeparator {
 }
 
 fn csv_contents(headers: Vec<String>, rows: Vec<Vec<String>>, separator: CsvSeparator) -> Result<String, String> {
-    if headers.is_empty() || headers.len() > 128 || rows.iter().any(|row| row.len() != headers.len()) {
+    if headers.is_empty() || headers.len() > MAX_COLUMNS || rows.iter().any(|row| row.len() != headers.len()) {
         return Err("The CSV rows must match the table columns".into());
     }
     let separator = match separator {
@@ -224,7 +245,7 @@ pub fn list(root: &Path) -> Result<Vec<String>, String> {
 
 pub fn create(root: &Path, path: &str, config: NewBase) -> Result<(), String> {
     let path = base_path(path)?;
-    if config.columns.is_empty() || config.columns.len() > 128 || !config.columns.iter().all(|key| column(key))
+    if config.columns.is_empty() || config.columns.len() > MAX_COLUMNS || !config.columns.iter().all(|key| column(key))
         || !config.columns.contains(&config.sort) {
         return Err("Choose supported columns and a sort column".into());
     }
@@ -410,7 +431,7 @@ fn grouping(view: &Yaml) -> Result<Option<PropertyOrder>, String> {
         return Ok(None);
     }
     let property = by["property"].as_str().ok_or("Invalid grouping property")?;
-    let property = if property.contains('.') { property.to_owned() } else { format!("note.{property}") };
+    let property = property_key(property);
     if !column(&property) { return Err("Unsupported grouping property".into()); }
     let direction = match by["direction"].as_str() {
         Some("DESC") => Direction::Descending,
@@ -426,7 +447,7 @@ fn sorting(view: &Yaml) -> Result<Vec<PropertyOrder>, String> {
     if sort.is_badvalue() { return Ok(Vec::new()); }
     sort.as_vec().ok_or("Invalid base sort")?.iter().map(|key| {
         let property = key["property"].as_str().ok_or("Invalid base sort property")?;
-        let property = if property.contains('.') { property.to_owned() } else { format!("note.{property}") };
+        let property = property_key(property);
         if !column(&property) { return Err("Unsupported base sort property".into()); }
         let direction = match key["direction"].as_str() {
             Some("ASC") => Direction::Ascending,
@@ -537,6 +558,23 @@ pub fn set_sorting(
     })
 }
 
+pub fn set_columns(
+    root: &Path, index: &Index, path: &str, revision: &str, id: usize, columns: Vec<String>,
+) -> Result<Base, String> {
+    edit_view(root, index, path, revision, id, |view| {
+        let mut seen = BTreeSet::new();
+        if columns.is_empty() || columns.len() > MAX_COLUMNS
+            || !columns.iter().all(|key| column(key) && seen.insert(key)) {
+            return Err("Choose between one and 128 distinct supported columns".into());
+        }
+        if view_columns(view)? == columns { return Ok(()); }
+        let Yaml::Hash(settings) = view else { return Err("Invalid table view".into()); };
+        let order = Yaml::Array(columns.into_iter().map(Yaml::String).collect());
+        settings.insert(Yaml::String("order".into()), order);
+        Ok(())
+    })
+}
+
 fn edit_view(
     root: &Path, index: &Index, path: &str, revision: &str, id: usize,
     edit: impl FnOnce(&mut Yaml) -> Result<(), String>,
@@ -580,18 +618,25 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
         properties.extend(note.keys().filter_map(|key| key.as_str().map(str::to_owned)));
         global.matches(name, &note).then(|| (name, note_views::row_from_properties(name, &note), note))
     }).collect();
+    let labels: BTreeMap<_, _> = base["properties"].as_hash().into_iter().flatten().filter_map(|(key, settings)| {
+        let key = key.as_str()?;
+        let label = settings["displayName"].as_str()?;
+        let key = property_key(key);
+        if !column(&key) { return None; }
+        let canonical = base["properties"][key.as_str()]["displayName"].as_str().unwrap_or(label);
+        Some((key, canonical.to_owned()))
+    }).collect();
     let views = views.iter().enumerate().filter(|(_, view)| view["type"].as_str() == Some("table")).map(|(id, view)| {
         if !view["summaries"].is_badvalue() {
             return Err("Summaries are not supported in base tables yet".into());
         }
-        let mut columns = if view["order"].is_badvalue() {
-            vec![FILE_NAME.to_owned()]
-        } else {
-            view["order"].as_vec().filter(|order| order.len() <= 128).ok_or("Invalid table column order")?
-                .iter().map(|value| value.as_str().filter(|key| column(key)).map(str::to_owned)
-                    .ok_or("This base uses an unsupported column")).collect::<Result<Vec<_>, _>>()?
-        };
-        if columns.is_empty() { columns.push(FILE_NAME.into()); }
+        let columns = view_columns(view)?;
+        let mut labels = labels.clone();
+        for key in &columns {
+            if let Some(display) = key.strip_prefix("note.").and_then(|name| base["properties"][name]["displayName"].as_str()) {
+                labels.entry(key.clone()).or_insert_with(|| display.to_owned());
+            }
+        }
         let sort = sorting(view)?;
         let filter = Filter::parse(&view["filters"], 0)?;
         let matching = docs.iter().filter(|(name, _, properties)| filter.matches(name, properties));
@@ -600,12 +645,6 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
         let (rows, groups) = grouped_rows(group_by.as_ref(), order, matching)?;
         let manual_groups = !order.is_badvalue();
         let limit = view["limit"].as_i64().and_then(|limit| usize::try_from(limit).ok());
-        let labels = columns.iter().filter_map(|key| {
-            let props = &base["properties"];
-            let label = props[key.as_str()]["displayName"].as_str()
-                .or_else(|| key.strip_prefix("note.").and_then(|key| props[key]["displayName"].as_str()))?;
-            Some((key.clone(), label.to_owned()))
-        }).collect();
         Ok(Table { id, title: view["name"].as_str().unwrap_or("Notes").to_owned(), columns, sort, limit, labels, rows, groups, group_by, manual_groups })
     }).collect::<Result<Vec<_>, String>>()?;
     if views.is_empty() { return Err("This base has no supported table view".into()); }
@@ -846,5 +885,52 @@ views:
         for invalid in ["../../Otro.csv", "C:/Otro.csv", "Proyecto/Otro.csv", "Informe.txt", "NUL.csv"] {
             assert!(export_csv(&root, base, invalid, headers(), rows(), CsvSeparator::Comma).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn edits_visible_columns_in_order_without_changing_other_view_settings() {
+        let root = std::env::temp_dir().join(format!("opensidian-base-columns-{}", opensidian_lib::os_random_hex().unwrap()));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let path = "Work.base";
+        let yaml = r#"properties:
+  project.status: {displayName: Status}
+  note.project.status: {displayName: Workflow}
+views:
+  - type: table
+    order: [file.name, project.status]
+    sort: [{property: project.status, direction: ASC}]
+    limit: 10
+  - type: table
+    order: [file.folder]
+"#;
+        let file = root.join(path);
+        fs::write(&file, yaml).unwrap();
+        let index = Index::build(&root);
+        let opened = open(&root, &index, path).unwrap();
+        assert_eq!(opened.views[0].columns, ["file.name", "note.project.status"]);
+        assert_eq!(opened.views[0].labels["note.project.status"], "Workflow");
+        let unchanged = set_columns(&root, &index, path, &opened.revision, 0, opened.views[0].columns.clone()).unwrap();
+        assert_eq!(unchanged.revision, opened.revision);
+        for invalid in [vec![], vec!["file.name".into(); 2], vec!["formula.score".into()]] {
+            assert!(set_columns(&root, &index, path, &opened.revision, 0, invalid).is_err());
+        }
+        assert_eq!(fs::read(&file).unwrap(), yaml.as_bytes());
+        let updated = set_columns(&root, &index, path, &opened.revision, 0,
+            vec!["file.folder".into(), "file.name".into()]).unwrap();
+        assert_eq!(updated.views[0].columns, ["file.folder", "file.name"]);
+        assert_eq!(updated.views[0].sort[0].property, "note.project.status");
+        assert_eq!(updated.views[0].limit, Some(10));
+        assert_eq!(updated.views[0].labels["note.project.status"], "Workflow");
+        let reopened = open(&root, &index, path).unwrap();
+        assert_eq!(reopened.views[0].columns, updated.views[0].columns);
+        assert_eq!(reopened.views[1].columns, opened.views[1].columns);
+        let parsed = parse(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(parsed["views"][0]["sort"], parse(yaml.as_bytes()).unwrap()["views"][0]["sort"]);
+        assert!(set_columns(&root, &index, path, &opened.revision, 0, vec!["file.ext".into()]).is_err());
     }
 }

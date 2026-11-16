@@ -1369,6 +1369,16 @@ fn set_vault_base_sorting(
 
 #[cfg(windows)]
 #[tauri::command]
+fn set_vault_base_columns(
+    v: State<Vault>, path: String, revision: String, id: usize, columns: Vec<String>,
+) -> Result<bases::Base, String> {
+    let root = cur_vault(&v).ok_or("No vault open")?;
+    let index = v.index.lock().map_err(|error| error.to_string())?;
+    bases::set_columns(&root, &index, &path, &revision, id, columns)
+}
+
+#[cfg(windows)]
+#[tauri::command]
 async fn export_vault_base_csv(
     v: State<'_, Vault>, path: String, filename: String, headers: Vec<String>, rows: Vec<Vec<String>>,
     separator: bases::CsvSeparator,
@@ -7331,6 +7341,7 @@ fn main() {
             #[cfg(windows)] open_vault_base,
             #[cfg(windows)] set_vault_base_grouping,
             #[cfg(windows)] set_vault_base_sorting,
+            #[cfg(windows)] set_vault_base_columns,
             #[cfg(windows)] export_vault_base_csv,
             #[cfg(windows)] canvas_version_history,
             #[cfg(windows)] read_canvas_revision,
