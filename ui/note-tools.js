@@ -352,6 +352,40 @@ async function toolNoteTable() {
 
 const baseFileProperties = [["file.name", "Note"], ["file.path", "Path"], ["file.folder", "Folder"], ["file.ext", "Extension"]];
 
+async function toolBases() {
+  const { dialog, body, status } = toolDialog("Bases");
+  const create = toolButton("Create a base", () => {
+    dialog.close();
+    void toolCreateBase("");
+  });
+  body.append(create);
+  status("Loading saved bases…");
+  try {
+    const paths = await inv("vault_base_paths");
+    if (!dialog.open) return;
+    if (!paths.length) { status("No saved bases in this vault."); return; }
+    const filter = toolFilter("Search saved bases");
+    const list = toolNode("ul");
+    list.className = "note-tool-list";
+    const entries = paths.map(path => {
+      const row = toolNode("li");
+      row.append(toolButton(path, () => {
+        dialog.close();
+        void toolOpenBase(path);
+      }));
+      return { row, key: path.toLocaleLowerCase() };
+    });
+    filter.oninput = () => {
+      const query = filter.value.trim().toLocaleLowerCase();
+      const matches = entries.filter(entry => entry.key.includes(query));
+      list.replaceChildren(...matches.map(entry => entry.row));
+      status(matches.length ? "" : "No saved bases match.");
+    };
+    body.append(filter, list);
+    filter.oninput();
+  } catch (error) { if (dialog.open) status(errStr(error)); }
+}
+
 function basePropertyOptions(properties) {
   return [...baseFileProperties, ...properties.map(key => ["note." + key, key])];
 }

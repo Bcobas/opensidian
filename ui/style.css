@@ -417,6 +417,7 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
                  cursor: pointer; border-radius: 4px }
 #ribbon button:hover { background: var(--bg-surface); color: var(--text-chrome) }
 #ribbon button svg { width: 18px; height: 18px; display: block }
+#ribbon #basesbtn { font-size: 0.75rem; font-weight: 600; color: var(--text-chrome) }
 /* R22: the sidebars keep their nominal width but SHRINK (never past 40% of the
    window each) instead of forcing the body wider than the viewport — 44 + 156
    + 260 = 460px of fixed chrome does not fit a 320px window. overflow:hidden

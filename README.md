@@ -36,6 +36,7 @@ Open the command palette with **Ctrl+P** to use the vault tools.
 - **Open today's note** opens or creates `Daily/YYYY-MM-DD.md`. **Open vault tasks** lists Markdown tasks with status and text filters and links to their source lines.
 - **Save updated package** exports the edited temporary package as a new `.opensidian.zip` on Windows. Review the files, choose the main note and choose where to save the copy. The ZIP preserves relative paths, including new subfolders, and can also be extracted by a standard ZIP tool.
 - **Open note table** filters and sorts notes by name or YAML frontmatter properties.
+- On Windows, **Bases** in the left ribbon lists the vault’s saved `.base` files and offers **Create a base**. You can also run **Open Bases** from the command palette.
 - **Capture web content** saves a public page URL or a pasted selection into `Web captures/`, with an option to download supported images into the vault. Page capture uses the HTML sent by the site and the system `curl` command.
 
 To build locally, install the MSVC C++ build tools, WebView2, Rust 1.98.0, and Tauri CLI 2.11.4. From the repository root, run:

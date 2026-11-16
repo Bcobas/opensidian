@@ -10010,6 +10010,7 @@ const CMDS = [
   ["opensidian:daily", "Open today's note", [], toolDaily, () => !!vaultPath],
   ["opensidian:tasks", "Open vault tasks", [], toolTasks, () => !!vaultPath],
   ["opensidian:note-table", "Open note table", [], toolNoteTable, () => !!vaultPath],
+  ["opensidian:bases", "Open Bases", [], toolBases, () => !!vaultPath && windowsFileActions],
   ["opensidian:new-base", "Create a base", [], () => toolCreateBase(""), () => !!vaultPath && windowsFileActions],
   ["opensidian:package-export", "Export note with its files", [], () => toolPortableExport(toolActiveNote()), () => !!toolActiveNote()],
   ["opensidian:package-open", "Open portable package", [], toolOpenPackage],
@@ -12083,6 +12084,7 @@ async function openLocalGraph(g) {
   for (const h of groups()) renderTabs(h);  // chain glyph lands on the source tab too
 }
 $("lgbtn").onclick = cmdLocalGraph;
+$("basesbtn").onclick = toolBases;
 
 /* ---------- vault picker ---------- */
 function base(p) { return p.replace(/\/+$/, "").split("/").pop() || p; }
@@ -12266,6 +12268,7 @@ async function enterVault() {
   edtBad = Ed.selfTest();            // R17: renderer + token map invariants -> [edt:] census
   await loadVaultCss();              // themefs R3: the vault's own snippet CSS, before first paint of a note
   await refreshTree();
+  $("basesbtn").hidden = !windowsFileActions;
   await refreshBm();                 // R9.4: menu label needs the cache early
   const names = await inv("list_notes");
   // R28.7 / R28.13: the restore, or — if there is no file, it is corrupt, or
