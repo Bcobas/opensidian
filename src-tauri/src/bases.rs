@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
 use crate::{note_views, safe_rel, vaultfs::Vault, Index};
 
 const MAX_BYTES: u64 = 128 * 1024;
+const MAX_CSV_BYTES: usize = 32 * 1024 * 1024;
 const FILE_NAME: &str = "file.name";
 
 #[derive(Deserialize)]
@@ -133,6 +135,68 @@ fn column(key: &str) -> bool {
 
 fn base_path(path: &str) -> Result<PathBuf, String> {
     safe_rel(path).filter(|rel| is_base(rel)).ok_or_else(|| "Invalid .base path".into())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CsvSeparator {
+    Comma,
+    Semicolon,
+}
+
+fn csv_contents(headers: Vec<String>, rows: Vec<Vec<String>>, separator: CsvSeparator) -> Result<String, String> {
+    if headers.is_empty() || headers.len() > 128 || rows.iter().any(|row| row.len() != headers.len()) {
+        return Err("The CSV rows must match the table columns".into());
+    }
+    let separator = match separator {
+        CsvSeparator::Comma => ',',
+        CsvSeparator::Semicolon => ';',
+    };
+    let mut csv = String::from('\u{feff}');
+    for row in std::iter::once(headers).chain(rows) {
+        for (index, value) in row.into_iter().enumerate() {
+            if index != 0 { csv.push(separator); }
+            csv.push('"');
+            // Quoting alone does not stop spreadsheet apps from evaluating a cell.
+            let trimmed = value.trim_start_matches(|ch: char| ch.is_whitespace() || ch.is_control() || ch == '\u{feff}');
+            let starts_formula = trimmed.starts_with(['=', '+', '-', '@', '＝', '＋', '－', '＠']);
+            let plain_number = trimmed.starts_with(['+', '-'])
+                && trimmed.parse::<f64>().is_ok_and(f64::is_finite);
+            if (starts_formula && !plain_number) || value.starts_with(['\t', '\r', '\n', '\0']) {
+                csv.push('\'');
+            }
+            for ch in value.chars() {
+                if ch == '"' { csv.push('"'); }
+                csv.push(ch);
+            }
+            csv.push('"');
+            if csv.len() > MAX_CSV_BYTES { return Err("The CSV would exceed 32 MiB".into()); }
+        }
+        csv.push_str("\r\n");
+    }
+    if csv.len() > MAX_CSV_BYTES { return Err("The CSV would exceed 32 MiB".into()); }
+    Ok(csv)
+}
+
+pub fn export_csv(
+    root: &Path, base: &str, filename: &str, headers: Vec<String>, rows: Vec<Vec<String>>, separator: CsvSeparator,
+) -> Result<String, String> {
+    let base = base_path(base)?;
+    let filename = safe_rel(filename).filter(|path| {
+        path.components().count() == 1 && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+    }).ok_or("Enter a valid CSV file name")?;
+    let vault = Vault::open(root).map_err(|error| error.to_string())?;
+    if !vault.is_file(&base) { return Err("The base could not be found".into()); }
+    let destination = base.with_file_name(filename);
+    let contents = csv_contents(headers, rows, separator)?;
+    vault.write_new_atomic(&destination, contents.as_bytes()).map_err(|error| {
+        if error.kind() == ErrorKind::AlreadyExists {
+            "A file with that name already exists. Choose another name.".to_owned()
+        } else {
+            format!("Could not export CSV: {error}")
+        }
+    })?;
+    Ok(opensidian_lib::vault_path_string(&destination))
 }
 
 pub fn list(root: &Path) -> Result<Vec<String>, String> {
@@ -670,6 +734,37 @@ views:
         assert!(!filter.matches("Note", &note_views::properties("---\ndone: \"true\"\n---\n")));
         for expr in ["file.name == 1", "priority > \"3\"", "note.done == true || true", "note.priority == 1e999"] {
             assert!(Filter::parse(&Yaml::String(expr.into()), 0).is_err(), "{expr}");
+        }
+    }
+
+    #[test]
+    fn exports_spreadsheet_ready_csv_without_overwriting_files() {
+        let root = std::env::temp_dir().join(format!("opensidian-base-csv-{}", opensidian_lib::os_random_hex().unwrap()));
+        fs::create_dir_all(root.join("Proyecto")).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let base = "Proyecto/Notas.base";
+        fs::write(root.join(base), "views: [{type: table}]").unwrap();
+        let headers = || vec!["Nota".into(), "Detalle".into()];
+        let rows = || vec![
+            vec!["Café, té".into(), "Dijo \"hola\"\nAdiós".into()],
+            vec!["-3.5".into(), "  =1+1".into()],
+            vec!["".into(), "@pendiente".into()],
+        ];
+        let saved = export_csv(&root, base, "Informe.csv", headers(), rows(), CsvSeparator::Semicolon).unwrap();
+        assert_eq!(saved, "Proyecto/Informe.csv");
+        let expected = "\u{feff}\"Nota\";\"Detalle\"\r\n\"Café, té\";\"Dijo \"\"hola\"\"\nAdiós\"\r\n\"-3.5\";\"'  =1+1\"\r\n\"\";\"'@pendiente\"\r\n";
+        let file = root.join(saved);
+        assert_eq!(fs::read(&file).unwrap(), expected.as_bytes());
+        assert!(export_csv(&root, base, "Informe.csv", headers(), vec![], CsvSeparator::Comma).unwrap_err().contains("already exists"));
+        assert_eq!(fs::read(&file).unwrap(), expected.as_bytes());
+        assert_eq!(csv_contents(headers(), vec![], CsvSeparator::Comma).unwrap(), "\u{feff}\"Nota\",\"Detalle\"\r\n");
+        assert!(csv_contents(headers(), vec![vec!["Short".into()]], CsvSeparator::Comma).is_err());
+        for invalid in ["../../Otro.csv", "C:/Otro.csv", "Proyecto/Otro.csv", "Informe.txt", "NUL.csv"] {
+            assert!(export_csv(&root, base, invalid, headers(), rows(), CsvSeparator::Comma).is_err(), "{invalid}");
         }
     }
 }

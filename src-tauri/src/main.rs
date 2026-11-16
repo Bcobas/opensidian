@@ -1357,6 +1357,17 @@ fn set_vault_base_grouping(v: State<Vault>, path: String, revision: String, id: 
     bases::set_grouping(&root, &index, &path, &revision, id, group_by)
 }
 
+#[cfg(windows)]
+#[tauri::command]
+async fn export_vault_base_csv(
+    v: State<'_, Vault>, path: String, filename: String, headers: Vec<String>, rows: Vec<Vec<String>>,
+    separator: bases::CsvSeparator,
+) -> Result<String, String> {
+    let root = cur_vault(&v).ok_or("No vault open")?;
+    tauri::async_runtime::spawn_blocking(move || bases::export_csv(&root, &path, &filename, headers, rows, separator))
+        .await.map_err(|error| error.to_string())?
+}
+
 fn package_catalog(v: &Vault) -> Result<Vec<String>, String> {
     let ix = v.index.lock().map_err(|e| e.to_string())?;
     Ok(ix.names().iter().map(|name| format!("{name}.md")).chain(ix.images().iter().cloned()).collect())
@@ -7309,6 +7320,7 @@ fn main() {
             #[cfg(windows)] create_vault_base,
             #[cfg(windows)] open_vault_base,
             #[cfg(windows)] set_vault_base_grouping,
+            #[cfg(windows)] export_vault_base_csv,
             #[cfg(windows)] canvas_version_history,
             #[cfg(windows)] read_canvas_revision,
             #[cfg(windows)] restore_canvas_revision,

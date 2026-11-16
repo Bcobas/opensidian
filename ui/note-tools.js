@@ -538,6 +538,51 @@ function toolEditBaseGrouping(base, view, write) {
   };
 }
 
+function toolExportBaseCsv(path, headers, rows) {
+  const { dialog, body, status } = toolDialog("Export table as CSV");
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const name = toolNode("input");
+  name.value = path.split("/").pop().replace(/\.base$/i, "") + ".csv";
+  name.required = true;
+  const nameLabel = toolNode("label", "File name");
+  nameLabel.append(name);
+  const separator = toolSelect("Separator", [["comma", "Comma"], ["semicolon", "Semicolon"]]);
+  const separatorLabel = toolNode("label", "Separator");
+  separatorLabel.append(separator);
+  const save = toolNode("button", "Save CSV");
+  save.type = "submit";
+  const close = dialog.querySelector("header button");
+  fields.append(nameLabel, separatorLabel, save);
+  form.append(fields);
+  body.append(toolNode("p", "The CSV is saved next to the base in this vault."), form);
+  name.focus();
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    const stem = name.value.trim().replace(/\.csv$/i, "");
+    if (!stem || /[\\/]/.test(stem)) { status("Enter a file name without a folder path."); return; }
+    fields.disabled = close.disabled = true;
+    status("");
+    try {
+      const saved = await inv("export_vault_base_csv", { path, filename: stem + ".csv", headers, rows, separator: separator.value });
+      form.remove();
+      status("Saved " + saved);
+      close.disabled = false;
+      const reveal = toolButton("Show in Explorer", async () => {
+        try { await inv("vault_file_action", { path: saved, action: "reveal" }); }
+        catch (error) { status(errStr(error)); }
+      });
+      body.append(reveal);
+      reveal.focus();
+    } catch (error) {
+      status(errStr(error));
+      fields.disabled = close.disabled = false;
+    }
+  };
+}
+
 async function toolOpenBase(path) {
   const { dialog, body, status } = toolDialog(path);
   try {
@@ -553,6 +598,7 @@ async function toolOpenBase(path) {
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     const activeView = () => base.views[Number(choose.value)];
     let { sort, descending } = activeView();
+    let results = [];
     const edit = toolButton("Edit grouping", () => {
       const view = activeView();
       toolEditBaseGrouping(base, view, async groupBy => {
@@ -569,16 +615,22 @@ async function toolOpenBase(path) {
       const key = column.slice("note.".length);
       return Object.hasOwn(row.values, key) ? row.values[key] : "";
     };
+    const label = (view, key) => view.labels?.[key] ?? baseFileProperties.find(([property]) => key === property)?.[1] ?? key.slice(5);
+    const exportCsv = toolButton("Export CSV", () => {
+      const view = activeView();
+      toolExportBaseCsv(path, view.columns.map(key => label(view, key)),
+        results.map(row => view.columns.map(key => value(row, key))));
+    });
     const render = () => {
       const view = activeView();
       const query = filter.value.trim().toLocaleLowerCase();
+      results = [];
       head.replaceChildren();
       for (const key of view.columns) {
         const cell = toolNode("th");
         cell.scope = "col";
         cell.setAttribute("aria-sort", key === sort ? (descending ? "descending" : "ascending") : "none");
-        const label = view.labels?.[key] ?? baseFileProperties.find(([property]) => key === property)?.[1] ?? key.slice(5);
-        cell.append(toolButton(label, () => {
+        cell.append(toolButton(label(view, key), () => {
           descending = sort === key ? !descending : false;
           sort = key;
           render();
@@ -586,13 +638,11 @@ async function toolOpenBase(path) {
         head.append(cell);
       }
       while (table.tBodies.length) table.tBodies[0].remove();
-      let shown = 0;
       for (const group of view.groups ?? [{ rows: view.rows }]) {
         const matches = group.rows.filter(row => view.columns.some(key => value(row, key).toLocaleLowerCase().includes(query)));
         matches.sort((a, b) => (descending ? -1 : 1) * collator.compare(value(a, sort), value(b, sort)) || collator.compare(a.name, b.name));
-        const visible = matches.slice(0, (view.limit ?? Infinity) - shown);
+        const visible = matches.slice(0, (view.limit ?? Infinity) - results.length);
         if (!visible.length && (query || group.rows.length)) continue;
-        shown += visible.length;
         const data = table.createTBody();
         const items = [];
         if (view.groups) {
@@ -613,6 +663,7 @@ async function toolOpenBase(path) {
           data.insertRow().append(heading);
         }
         for (const row of visible) {
+          results.push(row);
           const item = data.insertRow();
           item.hidden = collapsed.has(group);
           items.push(item);
@@ -627,7 +678,7 @@ async function toolOpenBase(path) {
           });
         }
       }
-      status(shown ? `${shown} notes` : "No notes match.");
+      status(results.length ? `${results.length} notes` : "No notes match.");
     };
     choose.onchange = () => {
       const view = activeView();
@@ -636,7 +687,7 @@ async function toolOpenBase(path) {
       render();
     };
     filter.oninput = render;
-    body.append(filter, choose, edit, table);
+    body.append(filter, choose, edit, exportCsv, table);
     render();
   } catch (error) { status(errStr(error)); }
 }
