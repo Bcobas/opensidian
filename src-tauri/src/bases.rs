@@ -715,17 +715,11 @@ fn and_filter(filters: Vec<Yaml>) -> Yaml {
 pub fn add_view(
     root: &Path, index: &Index, path: &str, revision: &str, config: NewView,
 ) -> Result<Base, String> {
-    let name = config.name.trim();
-    if name.is_empty() || name.chars().count() > 128 || name.chars().any(char::is_control) {
-        return Err("Enter a view name between one and 128 characters".into());
-    }
+    let name = valid_view_name(&config.name)?;
     let conditions = condition_expressions(&config.conditions)?;
     edit_views(root, index, path, revision, |views| {
         if views.len() >= MAX_VIEWS { return Err("A base can contain up to sixteen views".into()); }
-        let normalized = name.to_lowercase();
-        if views.iter().any(|view| view_title(view).trim().to_lowercase() == normalized) {
-            return Err("A view with this name already exists".into());
-        }
+        check_view_name_available(views, name, None)?;
         let mut settings = match config.copy_from {
             Some(id) => table_view(views, id)?.as_hash().ok_or("Invalid table view")?.clone(),
             None => yaml_rust2::yaml::Hash::new(),
@@ -741,6 +735,48 @@ pub fn add_view(
         views.push(Yaml::Hash(settings));
         Ok(true)
     })
+}
+
+#[derive(Deserialize)]
+pub struct ViewSettings {
+    name: String,
+    make_first: bool,
+}
+
+pub fn set_view_settings(
+    root: &Path, index: &Index, path: &str, revision: &str, id: usize, config: ViewSettings,
+) -> Result<Base, String> {
+    edit_views(root, index, path, revision, |views| {
+        let current = view_title(table_view(views, id)?);
+        let rename = config.name != current && config.name.trim() != current;
+        if rename {
+            let name = valid_view_name(&config.name)?;
+            check_view_name_available(views, name, Some(id))?;
+            let Yaml::Hash(settings) = &mut views[id] else { return Err("Invalid table view".into()); };
+            settings.insert(Yaml::String("name".into()), Yaml::String(name.into()));
+        }
+        let reorder = config.make_first && id != 0;
+        if reorder {
+            views[..=id].rotate_right(1);
+        }
+        Ok(rename || reorder)
+    })
+}
+
+fn valid_view_name(name: &str) -> Result<&str, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 128 || name.chars().any(char::is_control) {
+        return Err("Enter a view name between one and 128 characters".into());
+    }
+    Ok(name)
+}
+
+fn check_view_name_available(views: &[Yaml], name: &str, except: Option<usize>) -> Result<(), String> {
+    let normalized = name.to_lowercase();
+    if views.iter().enumerate().any(|(id, view)| Some(id) != except && view_title(view).trim().to_lowercase() == normalized) {
+        return Err("A view with this name already exists".into());
+    }
+    Ok(())
 }
 
 fn view_title(view: &Yaml) -> &str {
@@ -1330,5 +1366,62 @@ views:
         assert_eq!((reopened.views[0].rows.len(), reopened.views[1].rows.len()), (2, 1));
         let cleared = set_base_filters(&root, &index, path, &complex.revision, ViewFilters::Yaml { yaml: String::new() }).unwrap();
         assert_eq!((cleared.views[0].rows.len(), cleared.views[1].rows.len()), (5, 4));
+    }
+
+    #[test]
+    fn renames_and_promotes_a_table_without_reordering_other_views() {
+        let root = std::env::temp_dir().join(format!("opensidian-base-view-settings-{}", opensidian_lib::os_random_hex().unwrap()));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let path = "Work.base";
+        let yaml = r#"# Start with a non-table view
+filters: 'file.ext == "md"'
+views:
+  - {type: cards, name: Gallery}
+  - {type: table, name: Inbox}
+  - type: table
+    name: Today
+    order: [file.name, priority]
+    filters: 'priority >= 5'
+    limit: 10
+  - {type: table, name: Later}
+"#;
+        let file = root.join(path);
+        fs::write(&file, yaml).unwrap();
+        let index = Index::build(&root);
+        let opened = open(&root, &index, path).unwrap();
+        assert_eq!(opened.views[0].id, 1);
+        assert_eq!(opened.views[1].id, 2);
+        let config = |name: &str, make_first| ViewSettings { name: name.into(), make_first };
+        let set = |revision: &str, id, config| set_view_settings(&root, &index, path, revision, id, config);
+        assert!(set(&opened.revision, 2, config("  gALlery ", true)).is_err());
+        assert!(set(&opened.revision, 2, config(" ", false)).is_err());
+        assert!(set(&opened.revision, 0, config("Other", false)).is_err());
+        let unchanged = set(&opened.revision, 2, config("Today", false)).unwrap();
+        assert_eq!(unchanged.revision, opened.revision);
+        assert_eq!(fs::read(&file).unwrap(), yaml.as_bytes());
+        let renamed = set(&opened.revision, 2, config("  Focus  ", false)).unwrap();
+        assert_eq!(renamed.views[0].title, "Inbox");
+        assert_eq!(renamed.views[1].title, "Focus");
+        let before = parse(&fs::read(&file).unwrap()).unwrap();
+        assert!(set(&opened.revision, 2, config("Urgent", true)).is_err());
+        let promoted = set(&renamed.revision, 2, config("Focus", true)).unwrap();
+        let reopened = open(&root, &index, path).unwrap();
+        assert_eq!(reopened.views[0].title, "Focus");
+        assert_eq!(reopened.views[0].id, 0);
+        assert_eq!(reopened.views[1].id, 2);
+        assert_eq!(reopened.revision, promoted.revision);
+        let after = parse(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(after["filters"], before["filters"]);
+        assert_eq!(after["views"][0], before["views"][2]);
+        assert_eq!(after["views"][1], before["views"][0]);
+        assert_eq!(after["views"][2], before["views"][1]);
+        assert_eq!(after["views"][3], before["views"][3]);
+        let no_op = set(&promoted.revision, 0, config("Focus", true)).unwrap();
+        assert_eq!(no_op.revision, promoted.revision);
     }
 }

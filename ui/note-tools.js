@@ -570,6 +570,44 @@ function toolAddBaseView(base, view, write) {
   };
 }
 
+function toolEditBaseView(view, write) {
+  const { dialog, body, status } = toolDialog("Edit view · " + view.title);
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const name = toolNode("input");
+  name.required = true;
+  name.value = view.title;
+  const nameLabel = toolNode("label", "View name");
+  nameLabel.append(name);
+  const first = toolNode("input");
+  first.type = "checkbox";
+  first.checked = first.disabled = view.id === 0;
+  const firstLabel = toolNode("label");
+  firstLabel.append(first, document.createTextNode(first.checked ? " Opens first" : " Open this view first"));
+  const save = toolNode("button", "Save view");
+  save.type = "submit";
+  const close = dialog.querySelector("header button");
+  fields.append(nameLabel, firstLabel, save);
+  form.append(fields);
+  body.append(toolNode("p", "Saving a change rewrites the YAML formatting and removes comments."), form);
+  name.focus();
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    if (!name.value.trim()) { status("Enter a view name."); return; }
+    fields.disabled = close.disabled = true;
+    status("");
+    try {
+      await write({ name: name.value, make_first: first.checked });
+      dialog.close();
+    } catch (error) {
+      status(errStr(error));
+      fields.disabled = close.disabled = false;
+    }
+  };
+}
+
 function toolEditBaseFilters(base, view, write) {
   const { dialog, body, status } = toolDialog("Edit filters · " + (view?.title ?? "All views"));
   const form = toolNode("form");
@@ -852,8 +890,17 @@ async function toolOpenBase(path) {
     await toolFlush();
     let base = await inv("open_vault_base", { path });
     if (!dialog.open) return;
-    const choose = toolSelect("Table view", base.views.map((view, index) => [String(index), view.title]));
-    choose.hidden = base.views.length === 1;
+    const choose = toolSelect("Table view", []);
+    const refreshViewPicker = (selection) => {
+      choose.replaceChildren(...base.views.map((view, index) => {
+        const option = toolNode("option", view.title);
+        option.value = String(index);
+        return option;
+      }));
+      choose.value = String(selection);
+      choose.hidden = base.views.length === 1;
+    };
+    refreshViewPicker(0);
     const filter = toolFilter("Filter this table");
     const table = toolNode("table");
     const head = table.createTHead().insertRow();
@@ -866,14 +913,19 @@ async function toolOpenBase(path) {
     const addView = toolButton("Add view", () => {
       toolAddBaseView(base, activeView(), async config => {
         base = await inv("add_vault_base_view", { path, revision: base.revision, config });
-        const index = base.views.length - 1;
-        const option = toolNode("option", base.views[index].title);
-        option.value = String(index);
-        choose.append(option);
-        choose.value = option.value;
-        choose.hidden = false;
+        refreshViewPicker(base.views.length - 1);
         filter.value = "";
         sortOverride = null;
+        collapsed.clear();
+        render();
+      });
+    });
+    const editView = toolButton("Edit view", () => {
+      const selection = Number(choose.value);
+      const view = activeView();
+      toolEditBaseView(view, async config => {
+        base = await inv("set_vault_base_view", { path, revision: base.revision, id: view.id, config });
+        refreshViewPicker(config.make_first ? 0 : selection);
         collapsed.clear();
         render();
       });
@@ -1006,7 +1058,7 @@ async function toolOpenBase(path) {
       render();
     };
     filter.oninput = render;
-    body.append(filter, choose, addView, edit, editSort, editColumns, editFilters, editBaseFilters, exportCsv, table);
+    body.append(filter, choose, addView, editView, edit, editSort, editColumns, editFilters, editBaseFilters, exportCsv, table);
     render();
   } catch (error) { status(errStr(error)); }
 }
