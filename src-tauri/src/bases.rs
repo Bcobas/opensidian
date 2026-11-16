@@ -15,6 +15,7 @@ const MAX_BYTES: u64 = 128 * 1024;
 const MAX_CSV_BYTES: usize = 32 * 1024 * 1024;
 const MAX_COLUMNS: usize = 128;
 const MAX_VIEWS: usize = 16;
+const MAX_CONDITIONS: usize = 16;
 const FILE_NAME: &str = "file.name";
 
 #[derive(Deserialize)]
@@ -50,7 +51,7 @@ enum Direction {
     Descending,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, PartialEq)]
 pub struct Condition {
     property: String,
     operator: Operator,
@@ -58,7 +59,7 @@ pub struct Condition {
     value: String,
 }
 
-#[derive(Deserialize, Clone, Copy, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Operator { Eq, Ne, Ge, Le, Gt, Lt }
 
@@ -82,7 +83,7 @@ impl Operator {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum ValueKind { Text, Number, Checkbox }
 
@@ -107,7 +108,7 @@ impl Condition {
 }
 
 fn condition_expressions(conditions: &[Condition]) -> Result<Vec<String>, String> {
-    if conditions.len() > 16 { return Err("A base can save up to sixteen property conditions at a time".into()); }
+    if conditions.len() > MAX_CONDITIONS { return Err("A base can save up to sixteen property conditions at a time".into()); }
     conditions.iter().map(Condition::expression).collect()
 }
 
@@ -131,6 +132,14 @@ pub struct Table {
     groups: Option<Vec<TableGroup>>,
     group_by: Option<PropertyOrder>,
     manual_groups: bool,
+    filters: ViewFilters,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ViewFilters {
+    Conditions { conditions: Vec<Condition> },
+    Yaml { yaml: String },
 }
 
 #[derive(Serialize)]
@@ -367,6 +376,38 @@ impl Filter {
         Err(invalid())
     }
 
+    fn editable_conditions(&self) -> Option<Vec<Condition>> {
+        let mut conditions = Vec::new();
+        self.collect_conditions(&mut conditions)?;
+        Some(conditions)
+    }
+
+    fn collect_conditions(&self, conditions: &mut Vec<Condition>) -> Option<()> {
+        match self {
+            Self::All(children) => {
+                for child in children { child.collect_conditions(conditions)?; }
+            }
+            Self::Property(key, operator, expected) => {
+                let property = key.as_str()?;
+                if conditions.len() >= MAX_CONDITIONS || property.trim().is_empty()
+                    || property.len() > 256 || property.chars().any(char::is_control) {
+                    return None;
+                }
+                let kind = match expected {
+                    Yaml::String(text) if !text.contains(['\n', '\r']) => ValueKind::Text,
+                    Yaml::Boolean(_) => ValueKind::Checkbox,
+                    number if numeric(number).is_some() => ValueKind::Number,
+                    _ => return None,
+                };
+                conditions.push(Condition {
+                    property: property.into(), operator: *operator, kind, value: note_views::display(expected),
+                });
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
     fn matches(&self, note: &str, properties: &yaml_rust2::yaml::Hash) -> bool {
         match self {
             Self::All(filters) => filters.iter().all(|filter| filter.matches(note, properties)),
@@ -589,6 +630,43 @@ pub fn set_columns(
     })
 }
 
+pub fn set_filters(
+    root: &Path, index: &Index, path: &str, revision: &str, id: usize, filters: ViewFilters,
+) -> Result<Base, String> {
+    edit_view(root, index, path, revision, id, |view| {
+        let updated = match filters {
+            ViewFilters::Conditions { conditions } => {
+                let expressions = condition_expressions(&conditions)?;
+                if Filter::parse(&view["filters"], 0)?.editable_conditions().as_deref() == Some(&conditions) {
+                    return Ok(());
+                }
+                (!expressions.is_empty()).then(|| and_filter(expressions.into_iter().map(Yaml::String).collect()))
+            }
+            ViewFilters::Yaml { yaml } => {
+                if yaml.len() as u64 > MAX_BYTES { return Err("The filters are too large".into()); }
+                if yaml.trim().is_empty() {
+                    None
+                } else {
+                    let yaml = parse(yaml.as_bytes())?;
+                    Filter::parse(&yaml, 0)?;
+                    (!yaml.is_null()).then_some(yaml)
+                }
+            }
+        };
+        let Yaml::Hash(settings) = view else { return Err("Invalid table view".into()); };
+        let key = Yaml::String("filters".into());
+        if let Some(updated) = updated { settings.insert(key, updated); }
+        else { settings.remove(&key); }
+        Ok(())
+    })
+}
+
+fn and_filter(filters: Vec<Yaml>) -> Yaml {
+    let mut all = yaml_rust2::yaml::Hash::new();
+    all.insert(Yaml::String("and".into()), Yaml::Array(filters));
+    Yaml::Hash(all)
+}
+
 pub fn add_view(
     root: &Path, index: &Index, path: &str, revision: &str, config: NewView,
 ) -> Result<Base, String> {
@@ -613,9 +691,7 @@ pub fn add_view(
             let filters = Yaml::String("filters".into());
             let mut combined: Vec<_> = settings.remove(&filters).into_iter().filter(|filter| !filter.is_null()).collect();
             combined.extend(conditions.into_iter().map(Yaml::String));
-            let mut all = yaml_rust2::yaml::Hash::new();
-            all.insert(Yaml::String("and".into()), Yaml::Array(combined));
-            settings.insert(filters, Yaml::Hash(all));
+            settings.insert(filters, and_filter(combined));
         }
         views.push(Yaml::Hash(settings));
         Ok(true)
@@ -703,13 +779,20 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
         }
         let sort = sorting(view)?;
         let filter = Filter::parse(&view["filters"], 0)?;
+        let filters = if let Some(conditions) = filter.editable_conditions() {
+            ViewFilters::Conditions { conditions }
+        } else {
+            let mut yaml = String::new();
+            YamlEmitter::new(&mut yaml).dump(&view["filters"]).map_err(|error| error.to_string())?;
+            ViewFilters::Yaml { yaml: yaml.strip_prefix("---\n").unwrap_or(&yaml).to_owned() }
+        };
         let matching = docs.iter().filter(|(name, _, properties)| filter.matches(name, properties));
         let group_by = grouping(view)?;
         let order = &view["groupOrder"];
         let (rows, groups) = grouped_rows(group_by.as_ref(), order, matching)?;
         let manual_groups = !order.is_badvalue();
         let limit = view["limit"].as_i64().and_then(|limit| usize::try_from(limit).ok());
-        Ok(Table { id, title: view_title(view).to_owned(), columns, sort, limit, labels, rows, groups, group_by, manual_groups })
+        Ok(Table { id, title: view_title(view).to_owned(), columns, sort, limit, labels, rows, groups, group_by, manual_groups, filters })
     }).collect::<Result<Vec<_>, String>>()?;
     if views.is_empty() { return Err("This base has no supported table view".into()); }
     Ok(Base { revision, properties, can_add_view, views })
@@ -1061,5 +1144,75 @@ views:
         assert!(!opened.can_add_view);
         assert!(add_view(&root, &index, path, &opened.revision, config("Extra", None)).is_err());
         assert_eq!(fs::read(&file).unwrap(), full.as_bytes());
+    }
+
+    #[test]
+    fn edits_typed_and_nested_view_filters_without_changing_base_scope() {
+        let root = std::env::temp_dir().join(format!("opensidian-base-filter-edit-{}", opensidian_lib::os_random_hex().unwrap()));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let path = "Work.base";
+        let yaml = r#"# Existing comments survive an unchanged save.
+filters: 'file.inFolder("Work")'
+views:
+  - type: table
+    name: Ready
+    filters:
+      and:
+        - 'note.status == "open"'
+        - and: ['priority >= 4.5', 'done == false']
+  - type: table
+    name: Review
+    filters:
+      or: ['done == true', 'file.inFolder("Work/Review")']
+"#;
+        let file = root.join(path);
+        fs::write(&file, yaml).unwrap();
+        let mut index = Index::build(&root);
+        for (name, status, priority, done) in [
+            ("Work/Active", "open", 6, false),
+            ("Work/Review/Small", "open", 2, false),
+            ("Work/Closed", "closed", 6, true),
+            ("Other/Active", "open", 6, false),
+        ] {
+            index.upsert(name, &format!("---\nstatus: {status}\npriority: {priority}\ndone: {done}\n---\n"));
+        }
+        let opened = open(&root, &index, path).unwrap();
+        assert_eq!(opened.views[0].rows.len(), 1);
+        let ViewFilters::Conditions { conditions } = &opened.views[0].filters else { panic!("expected typed controls"); };
+        assert_eq!(serde_json::to_value(conditions).unwrap(), serde_json::json!([
+            {"property":"status", "operator":"eq", "kind":"text", "value":"open"},
+            {"property":"priority", "operator":"ge", "kind":"number", "value":"4.5"},
+            {"property":"done", "operator":"eq", "kind":"checkbox", "value":"false"},
+        ]));
+        let config: ViewFilters = serde_json::from_value(serde_json::to_value(&opened.views[0].filters).unwrap()).unwrap();
+        let no_change = set_filters(&root, &index, path, &opened.revision, 0, config).unwrap();
+        assert_eq!(no_change.revision, opened.revision);
+        assert_eq!(fs::read(&file).unwrap(), yaml.as_bytes());
+        let edited = set_filters(&root, &index, path, &opened.revision, 0, ViewFilters::Conditions {
+            conditions: vec![Condition { property: "done".into(), operator: Operator::Eq, kind: ValueKind::Checkbox, value: "true".into() }],
+        }).unwrap();
+        assert_eq!(edited.views[0].rows.len(), 1);
+        assert_eq!(serde_json::to_value(&edited.views[0].rows[0]).unwrap()["name"], "Work/Closed");
+        let ViewFilters::Yaml { yaml: advanced } = &edited.views[1].filters else { panic!("expected YAML control"); };
+        assert_eq!(parse(advanced.as_bytes()).unwrap(), parse(yaml.as_bytes()).unwrap()["views"][1]["filters"]);
+        let saved = fs::read(&file).unwrap();
+        assert!(set_filters(&root, &index, path, &edited.revision, 1, ViewFilters::Yaml { yaml: "invalid: []".into() }).is_err());
+        assert_eq!(fs::read(&file).unwrap(), saved);
+        assert_eq!(parse(&saved).unwrap()["filters"], parse(yaml.as_bytes()).unwrap()["filters"]);
+        let changed = set_filters(&root, &index, path, &edited.revision, 1, ViewFilters::Yaml {
+            yaml: "not:\n  - 'done == true'\n".into(),
+        }).unwrap();
+        assert_eq!(changed.views[1].rows.len(), 2);
+        let cleared = set_filters(&root, &index, path, &changed.revision, 1, ViewFilters::Yaml { yaml: String::new() }).unwrap();
+        assert_eq!(cleared.views[1].rows.len(), 3);
+        assert!(cleared.views[0].rows.len() == 1);
+        let reopened = open(&root, &index, path).unwrap();
+        assert!(matches!(&reopened.views[1].filters, ViewFilters::Conditions { conditions } if conditions.is_empty()));
+        assert!(set_filters(&root, &index, path, &opened.revision, 0, ViewFilters::Conditions { conditions: vec![] }).is_err());
     }
 }

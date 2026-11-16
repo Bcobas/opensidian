@@ -381,14 +381,15 @@ function baseGroupingFields(options, current, manual = false) {
   };
 }
 
-function baseConditionFields(properties) {
+function baseConditionFields(properties, initial = []) {
   const conditions = [];
   const filters = toolNode("fieldset");
   filters.append(toolNode("legend", "Property filters"));
-  const addCondition = toolButton("Add condition", () => {
-    if (conditions.length >= 16) return;
+  const options = [...new Set([...properties, ...initial.map(condition => condition.property)])].sort();
+  const addCondition = toolButton("Add condition", () => appendCondition().focus());
+  function appendCondition(initial = {}) {
     const group = toolNode("div");
-    const property = toolSelect("Filter property", properties.map(key => [key, key]));
+    const property = toolSelect("Filter property", options.map(key => [key, key]));
     const kind = toolSelect("Value type", [["text", "Text"], ["number", "Number"], ["checkbox", "Checkbox"]]);
     const operator = toolSelect("Comparison", [["eq", "Equals"], ["ne", "Does not equal"],
       ["gt", "Greater than"], ["ge", "At least"], ["lt", "Less than"], ["le", "At most"]]);
@@ -396,6 +397,11 @@ function baseConditionFields(properties) {
     value.placeholder = "Filter value";
     value.setAttribute("aria-label", "Filter value");
     const checkbox = toolSelect("Checkbox value", [["true", "True"], ["false", "False"]]);
+    property.value = initial.property ?? options[0] ?? "";
+    kind.value = initial.kind ?? "text";
+    operator.value = initial.operator ?? "eq";
+    if (initial.kind === "checkbox") checkbox.value = initial.value;
+    else value.value = initial.value ?? "";
     kind.onchange = () => {
       const isNumber = kind.value === "number";
       for (const option of operator.options) option.disabled = !isNumber && !["eq", "ne"].includes(option.value);
@@ -420,9 +426,11 @@ function baseConditionFields(properties) {
     filters.insertBefore(group, addCondition);
     conditions.push(condition);
     addCondition.disabled = conditions.length >= 16;
-    property.focus();
-  });
+    return property;
+  }
+  addCondition.disabled = !options.length;
   filters.append(addCondition);
+  initial.forEach(appendCondition);
   return { filters, read: () => conditions.map(read => read()) };
 }
 
@@ -556,6 +564,48 @@ function toolAddBaseView(base, view, write) {
       await write({ name: title, copy_from: copy.checked ? view.id : null, conditions: conditions.read() });
       dialog.close();
     } catch (error) {
+      status(errStr(error));
+      fields.disabled = close.disabled = false;
+    }
+  };
+}
+
+function toolEditBaseFilters(base, view, write) {
+  const { dialog, body, status } = toolDialog("Edit filters · " + view.title);
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const stored = view.filters;
+  let read;
+  if (stored.mode === "yaml") {
+    const input = toolNode("textarea");
+    input.rows = 8;
+    input.spellcheck = false;
+    input.value = stored.yaml;
+    const label = toolNode("label", "View filter YAML");
+    label.append(input);
+    fields.append(label, toolNode("p", "Clear the YAML to remove the filters from this view."));
+    read = () => ({ mode: "yaml", yaml: input.value });
+  } else {
+    const properties = baseViewPropertyOptions(base, view)
+      .filter(([key]) => key.startsWith("note.")).map(([key]) => key.slice(5));
+    const conditions = baseConditionFields(properties, stored.conditions);
+    fields.append(conditions.filters);
+    read = () => ({ mode: "conditions", conditions: conditions.read() });
+  }
+  const save = toolNode("button", "Save filters");
+  save.type = "submit";
+  const close = dialog.querySelector("header button");
+  fields.append(save);
+  form.append(fields);
+  body.append(toolNode("p", "Base-wide filters still apply. Saving a change rewrites the YAML formatting and removes comments."), form);
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    fields.disabled = close.disabled = true;
+    status("");
+    try { await write(read()); dialog.close(); }
+    catch (error) {
       status(errStr(error));
       fields.disabled = close.disabled = false;
     }
@@ -839,6 +889,14 @@ async function toolOpenBase(path) {
         render();
       });
     });
+    const editFilters = toolButton("Edit filters", () => {
+      const view = activeView();
+      toolEditBaseFilters(base, view, async filters => {
+        base = await inv("set_vault_base_filters", { path, revision: base.revision, id: view.id, filters });
+        collapsed.clear();
+        render();
+      });
+    });
     const value = (row, column) => {
       if (column === "file.name") return row.name.split("/").pop();
       if (column === "file.path") return row.name + ".md";
@@ -927,7 +985,7 @@ async function toolOpenBase(path) {
       render();
     };
     filter.oninput = render;
-    body.append(filter, choose, addView, edit, editSort, editColumns, exportCsv, table);
+    body.append(filter, choose, addView, edit, editSort, editColumns, editFilters, exportCsv, table);
     render();
   } catch (error) { status(errStr(error)); }
 }
