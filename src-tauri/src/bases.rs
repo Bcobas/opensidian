@@ -117,6 +117,7 @@ pub struct Base {
     revision: String,
     properties: BTreeSet<String>,
     can_add_view: bool,
+    filters: ViewFilters,
     views: Vec<Table>,
 }
 
@@ -138,8 +139,17 @@ pub struct Table {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ViewFilters {
-    Conditions { conditions: Vec<Condition> },
+    Conditions(FilterConditions),
     Yaml { yaml: String },
+}
+
+#[derive(Default, Deserialize, Serialize, PartialEq)]
+pub struct FilterConditions {
+    conditions: Vec<Condition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folder: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    markdown_only: bool,
 }
 
 #[derive(Serialize)]
@@ -276,9 +286,7 @@ pub fn create(root: &Path, path: &str, config: NewBase) -> Result<(), String> {
     // JSON is a valid YAML representation and safely quotes arbitrary property names.
     let mut filters = vec!["file.ext == \"md\"".to_owned()];
     if let Some(folder) = config.folder {
-        let folder = safe_rel(&folder).ok_or("Invalid base folder filter")?;
-        let literal = serde_json::to_string(&opensidian_lib::vault_path_string(&folder)).map_err(|error| error.to_string())?;
-        filters.push(format!("file.inFolder({literal})"));
+        filters.push(folder_expression(&folder)?);
     }
     filters.extend(condition_expressions(&config.conditions)?);
     let mut base = serde_json::json!({
@@ -296,6 +304,12 @@ pub fn create(root: &Path, path: &str, config: NewBase) -> Result<(), String> {
     if bytes.len() as u64 > MAX_BYTES { return Err("The base is too large".into()); }
     let vault = Vault::open(root).map_err(|error| error.to_string())?;
     vault.write_new_atomic(&path, &bytes).map_err(|error| format!("Could not create the base: {error}"))
+}
+
+fn folder_expression(folder: &str) -> Result<String, String> {
+    let folder = safe_rel(folder).ok_or("Enter a folder relative to the vault")?;
+    let literal = serde_json::to_string(&opensidian_lib::vault_path_string(&folder)).map_err(|error| error.to_string())?;
+    Ok(format!("file.inFolder({literal})"))
 }
 
 enum Filter {
@@ -376,20 +390,27 @@ impl Filter {
         Err(invalid())
     }
 
-    fn editable_conditions(&self) -> Option<Vec<Condition>> {
-        let mut conditions = Vec::new();
+    fn editable_conditions(&self) -> Option<FilterConditions> {
+        let mut conditions = FilterConditions::default();
         self.collect_conditions(&mut conditions)?;
         Some(conditions)
     }
 
-    fn collect_conditions(&self, conditions: &mut Vec<Condition>) -> Option<()> {
+    fn collect_conditions(&self, form: &mut FilterConditions) -> Option<()> {
         match self {
             Self::All(children) => {
-                for child in children { child.collect_conditions(conditions)?; }
+                for child in children { child.collect_conditions(form)?; }
+            }
+            Self::Extension(ext, true) if ext == "md" => form.markdown_only = true,
+            Self::Folder(folder) if folder.is_empty() => {}
+            Self::Folder(folder) if form.folder.is_none() => {
+                let path = safe_rel(folder)?;
+                if opensidian_lib::vault_path_string(&path) != *folder { return None; }
+                form.folder = Some(folder.clone());
             }
             Self::Property(key, operator, expected) => {
                 let property = key.as_str()?;
-                if conditions.len() >= MAX_CONDITIONS || property.trim().is_empty()
+                if form.conditions.len() >= MAX_CONDITIONS || property.trim().is_empty()
                     || property.len() > 256 || property.chars().any(char::is_control) {
                     return None;
                 }
@@ -399,7 +420,7 @@ impl Filter {
                     number if numeric(number).is_some() => ValueKind::Number,
                     _ => return None,
                 };
-                conditions.push(Condition {
+                form.conditions.push(Condition {
                     property: property.into(), operator: *operator, kind, value: note_views::display(expected),
                 });
             }
@@ -634,31 +655,55 @@ pub fn set_filters(
     root: &Path, index: &Index, path: &str, revision: &str, id: usize, filters: ViewFilters,
 ) -> Result<Base, String> {
     edit_view(root, index, path, revision, id, |view| {
-        let updated = match filters {
-            ViewFilters::Conditions { conditions } => {
-                let expressions = condition_expressions(&conditions)?;
-                if Filter::parse(&view["filters"], 0)?.editable_conditions().as_deref() == Some(&conditions) {
-                    return Ok(());
-                }
-                (!expressions.is_empty()).then(|| and_filter(expressions.into_iter().map(Yaml::String).collect()))
-            }
-            ViewFilters::Yaml { yaml } => {
-                if yaml.len() as u64 > MAX_BYTES { return Err("The filters are too large".into()); }
-                if yaml.trim().is_empty() {
-                    None
-                } else {
-                    let yaml = parse(yaml.as_bytes())?;
-                    Filter::parse(&yaml, 0)?;
-                    (!yaml.is_null()).then_some(yaml)
-                }
-            }
-        };
-        let Yaml::Hash(settings) = view else { return Err("Invalid table view".into()); };
-        let key = Yaml::String("filters".into());
-        if let Some(updated) = updated { settings.insert(key, updated); }
-        else { settings.remove(&key); }
+        update_filters(view, filters)?;
         Ok(())
     })
+}
+
+pub fn set_base_filters(
+    root: &Path, index: &Index, path: &str, revision: &str, filters: ViewFilters,
+) -> Result<Base, String> {
+    edit_base(root, index, path, revision, |base| update_filters(base, filters))
+}
+
+fn update_filters(target: &mut Yaml, filters: ViewFilters) -> Result<bool, String> {
+    let current = &target["filters"];
+    let updated = match filters {
+        ViewFilters::Conditions(form) => {
+            if Filter::parse(current, 0)?.editable_conditions().as_ref() == Some(&form) { return Ok(false); }
+            let mut expressions = condition_expressions(&form.conditions)?;
+            if let Some(folder) = form.folder {
+                expressions.insert(0, folder_expression(&folder)?);
+            }
+            if form.markdown_only { expressions.insert(0, "file.ext == \"md\"".into()); }
+            (!expressions.is_empty()).then(|| and_filter(expressions.into_iter().map(Yaml::String).collect()))
+        }
+        ViewFilters::Yaml { yaml } => {
+            if yaml.len() as u64 > MAX_BYTES { return Err("The filters are too large".into()); }
+            if yaml.trim().is_empty() {
+                None
+            } else {
+                let yaml = parse(yaml.as_bytes())?;
+                Filter::parse(&yaml, 0)?;
+                (!yaml.is_null()).then_some(yaml)
+            }
+        }
+    };
+    if updated.as_ref().unwrap_or(&Yaml::BadValue) == current { return Ok(false); }
+    let Yaml::Hash(settings) = target else { return Err("Invalid filter settings".into()); };
+    let key = Yaml::String("filters".into());
+    if let Some(updated) = updated { settings.insert(key, updated); }
+    else { settings.remove(&key); }
+    Ok(true)
+}
+
+fn filter_editor(source: &Yaml, filter: &Filter) -> Result<ViewFilters, String> {
+    if let Some(conditions) = filter.editable_conditions() {
+        return Ok(ViewFilters::Conditions(conditions));
+    }
+    let mut yaml = String::new();
+    YamlEmitter::new(&mut yaml).dump(source).map_err(|error| error.to_string())?;
+    Ok(ViewFilters::Yaml { yaml: yaml.strip_prefix("---\n").unwrap_or(&yaml).to_owned() })
 }
 
 fn and_filter(filters: Vec<Yaml>) -> Yaml {
@@ -722,17 +767,26 @@ fn edit_views(
     root: &Path, index: &Index, path: &str, revision: &str,
     edit: impl FnOnce(&mut Vec<Yaml>) -> Result<bool, String>,
 ) -> Result<Base, String> {
+    edit_base(root, index, path, revision, |base| {
+        let Yaml::Hash(settings) = base else { return Err("Invalid base".into()); };
+        let Some(Yaml::Array(views)) = settings.get_mut(&Yaml::String("views".into())) else {
+            return Err("Invalid base views".into());
+        };
+        edit(views)
+    })
+}
+
+fn edit_base(
+    root: &Path, index: &Index, path: &str, revision: &str,
+    edit: impl FnOnce(&mut Yaml) -> Result<bool, String>,
+) -> Result<Base, String> {
     let path = base_path(path)?;
     let vault = Vault::open(root).map_err(|error| error.to_string())?;
     let original = vault.p_read(&path, MAX_BYTES).map_err(|error| error.to_string())?;
     let conflict = "The base changed on disk. Reopen it and try again.";
     if revision != format!("{:x}", Sha256::digest(&original)) { return Err(conflict.into()); }
     let mut base = parse(&original)?;
-    let Yaml::Hash(root) = &mut base else { return Err("Invalid base".into()); };
-    let Some(Yaml::Array(views)) = root.get_mut(&Yaml::String("views".into())) else {
-        return Err("Invalid base views".into());
-    };
-    if !edit(views)? {
+    if !edit(&mut base)? {
         return render_base(&base, index, revision.into());
     }
     let mut yaml = String::new();
@@ -749,6 +803,7 @@ fn edit_views(
 
 fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, String> {
     let global = Filter::parse(&base["filters"], 0)?;
+    let filters = filter_editor(&base["filters"], &global)?;
     let views = base["views"].as_vec().filter(|views| !views.is_empty() && views.len() <= MAX_VIEWS)
         .ok_or("The base must contain between one and sixteen views")?;
     let can_add_view = views.len() < MAX_VIEWS;
@@ -779,13 +834,7 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
         }
         let sort = sorting(view)?;
         let filter = Filter::parse(&view["filters"], 0)?;
-        let filters = if let Some(conditions) = filter.editable_conditions() {
-            ViewFilters::Conditions { conditions }
-        } else {
-            let mut yaml = String::new();
-            YamlEmitter::new(&mut yaml).dump(&view["filters"]).map_err(|error| error.to_string())?;
-            ViewFilters::Yaml { yaml: yaml.strip_prefix("---\n").unwrap_or(&yaml).to_owned() }
-        };
+        let filters = filter_editor(&view["filters"], &filter)?;
         let matching = docs.iter().filter(|(name, _, properties)| filter.matches(name, properties));
         let group_by = grouping(view)?;
         let order = &view["groupOrder"];
@@ -795,7 +844,7 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
         Ok(Table { id, title: view_title(view).to_owned(), columns, sort, limit, labels, rows, groups, group_by, manual_groups, filters })
     }).collect::<Result<Vec<_>, String>>()?;
     if views.is_empty() { return Err("This base has no supported table view".into()); }
-    Ok(Base { revision, properties, can_add_view, views })
+    Ok(Base { revision, properties, can_add_view, filters, views })
 }
 
 #[cfg(test)]
@@ -1183,8 +1232,8 @@ views:
         }
         let opened = open(&root, &index, path).unwrap();
         assert_eq!(opened.views[0].rows.len(), 1);
-        let ViewFilters::Conditions { conditions } = &opened.views[0].filters else { panic!("expected typed controls"); };
-        assert_eq!(serde_json::to_value(conditions).unwrap(), serde_json::json!([
+        let ViewFilters::Conditions(form) = &opened.views[0].filters else { panic!("expected typed controls"); };
+        assert_eq!(serde_json::to_value(&form.conditions).unwrap(), serde_json::json!([
             {"property":"status", "operator":"eq", "kind":"text", "value":"open"},
             {"property":"priority", "operator":"ge", "kind":"number", "value":"4.5"},
             {"property":"done", "operator":"eq", "kind":"checkbox", "value":"false"},
@@ -1193,9 +1242,10 @@ views:
         let no_change = set_filters(&root, &index, path, &opened.revision, 0, config).unwrap();
         assert_eq!(no_change.revision, opened.revision);
         assert_eq!(fs::read(&file).unwrap(), yaml.as_bytes());
-        let edited = set_filters(&root, &index, path, &opened.revision, 0, ViewFilters::Conditions {
+        let edited = set_filters(&root, &index, path, &opened.revision, 0, ViewFilters::Conditions(FilterConditions {
             conditions: vec![Condition { property: "done".into(), operator: Operator::Eq, kind: ValueKind::Checkbox, value: "true".into() }],
-        }).unwrap();
+            ..Default::default()
+        })).unwrap();
         assert_eq!(edited.views[0].rows.len(), 1);
         assert_eq!(serde_json::to_value(&edited.views[0].rows[0]).unwrap()["name"], "Work/Closed");
         let ViewFilters::Yaml { yaml: advanced } = &edited.views[1].filters else { panic!("expected YAML control"); };
@@ -1212,7 +1262,73 @@ views:
         assert_eq!(cleared.views[1].rows.len(), 3);
         assert!(cleared.views[0].rows.len() == 1);
         let reopened = open(&root, &index, path).unwrap();
-        assert!(matches!(&reopened.views[1].filters, ViewFilters::Conditions { conditions } if conditions.is_empty()));
-        assert!(set_filters(&root, &index, path, &opened.revision, 0, ViewFilters::Conditions { conditions: vec![] }).is_err());
+        assert!(matches!(&reopened.views[1].filters, ViewFilters::Conditions(form) if form.conditions.is_empty()));
+        assert!(set_filters(&root, &index, path, &opened.revision, 0, ViewFilters::Conditions(FilterConditions::default())).is_err());
+    }
+
+    #[test]
+    fn edits_global_folder_and_properties_across_all_views() {
+        let root = std::env::temp_dir().join(format!("opensidian-base-global-{}", opensidian_lib::os_random_hex().unwrap()));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let path = "Work.base";
+        let yaml = r#"# Keep the source on an unchanged save.
+filters:
+  and:
+    - 'file.ext == "md"'
+    - 'file.inFolder("Work")'
+    - 'priority >= 2'
+views:
+  - {type: table, name: All}
+  - type: table
+    name: Open
+    filters: 'done == false'
+"#;
+        let file = root.join(path);
+        fs::write(&file, yaml).unwrap();
+        let mut index = Index::build(&root);
+        for (name, priority, done) in [
+            ("Work/Plan", 2, false), ("Archive/One", 4, false),
+            ("Archive/Sub/Two", 5, true), ("Archive/Low", 1, false), ("Archives/Other", 9, false),
+        ] {
+            index.upsert(name, &format!("---\npriority: {priority}\ndone: {done}\n---\n"));
+        }
+        let opened = open(&root, &index, path).unwrap();
+        assert_eq!((opened.views[0].rows.len(), opened.views[1].rows.len()), (1, 1));
+        let form = serde_json::to_value(&opened.filters).unwrap();
+        assert_eq!(form, serde_json::json!({
+            "mode": "conditions", "folder": "Work", "markdown_only": true,
+            "conditions": [{"property": "priority", "kind": "number", "operator": "ge", "value": "2"}],
+        }));
+        let no_change = set_base_filters(&root, &index, path, &opened.revision, serde_json::from_value(form.clone()).unwrap()).unwrap();
+        assert_eq!(no_change.revision, opened.revision);
+        assert_eq!(fs::read(&file).unwrap(), yaml.as_bytes());
+        let filter_in = |folder: &str| {
+            let mut edited = form.clone();
+            edited["folder"] = serde_json::json!(folder);
+            serde_json::from_value(edited).unwrap()
+        };
+        assert!(set_base_filters(&root, &index, path, &opened.revision, filter_in("../Archive")).is_err());
+        assert_eq!(fs::read(&file).unwrap(), yaml.as_bytes());
+        let scoped = set_base_filters(&root, &index, path, &opened.revision, filter_in("Archive")).unwrap();
+        assert_eq!((scoped.views[0].rows.len(), scoped.views[1].rows.len()), (2, 1));
+        assert_eq!(serde_json::to_value(&scoped.views[1].rows[0]).unwrap()["name"], "Archive/One");
+        let saved = fs::read(&file).unwrap();
+        assert_eq!(parse(&saved).unwrap()["views"], parse(yaml.as_bytes()).unwrap()["views"]);
+        assert!(set_base_filters(&root, &index, path, &opened.revision, filter_in("Work")).is_err());
+        assert!(set_base_filters(&root, &index, path, &scoped.revision, ViewFilters::Yaml { yaml: "bad: []".into() }).is_err());
+        assert_eq!(fs::read(&file).unwrap(), saved);
+        let complex = set_base_filters(&root, &index, path, &scoped.revision, ViewFilters::Yaml {
+            yaml: "or:\n  - 'file.inFolder(\"Work\")'\n  - 'done == true'\n".into(),
+        }).unwrap();
+        let reopened = open(&root, &index, path).unwrap();
+        assert!(matches!(reopened.filters, ViewFilters::Yaml { .. }));
+        assert_eq!((reopened.views[0].rows.len(), reopened.views[1].rows.len()), (2, 1));
+        let cleared = set_base_filters(&root, &index, path, &complex.revision, ViewFilters::Yaml { yaml: String::new() }).unwrap();
+        assert_eq!((cleared.views[0].rows.len(), cleared.views[1].rows.len()), (5, 4));
     }
 }

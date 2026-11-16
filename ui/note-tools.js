@@ -571,33 +571,47 @@ function toolAddBaseView(base, view, write) {
 }
 
 function toolEditBaseFilters(base, view, write) {
-  const { dialog, body, status } = toolDialog("Edit filters · " + view.title);
+  const { dialog, body, status } = toolDialog("Edit filters · " + (view?.title ?? "All views"));
   const form = toolNode("form");
   const fields = toolNode("fieldset");
-  const stored = view.filters;
+  const stored = view ? view.filters : base.filters;
   let read;
   if (stored.mode === "yaml") {
     const input = toolNode("textarea");
     input.rows = 8;
     input.spellcheck = false;
     input.value = stored.yaml;
-    const label = toolNode("label", "View filter YAML");
+    const label = toolNode("label", "Filter YAML");
     label.append(input);
-    fields.append(label, toolNode("p", "Clear the YAML to remove the filters from this view."));
+    fields.append(label, toolNode("p", view ? "Clear the YAML to remove the filters from this view."
+      : "Clear the YAML to remove the base-wide filters."));
     read = () => ({ mode: "yaml", yaml: input.value });
   } else {
-    const properties = baseViewPropertyOptions(base, view)
-      .filter(([key]) => key.startsWith("note.")).map(([key]) => key.slice(5));
+    const properties = view ? baseViewPropertyOptions(base, view)
+      .filter(([key]) => key.startsWith("note.")).map(([key]) => key.slice(5)) : base.properties;
     const conditions = baseConditionFields(properties, stored.conditions);
-    fields.append(conditions.filters);
-    read = () => ({ mode: "conditions", conditions: conditions.read() });
+    const folder = toolNode("input");
+    folder.value = stored.folder ?? "";
+    const folderLabel = toolNode("label", "Folder path within the vault (optional)");
+    folderLabel.append(folder);
+    const markdown = toolNode("input");
+    markdown.type = "checkbox";
+    markdown.checked = stored.markdown_only ?? false;
+    const markdownLabel = toolNode("label");
+    markdownLabel.append(markdown, document.createTextNode(" Restrict to Markdown files"));
+    fields.append(conditions.filters, folderLabel, markdownLabel);
+    read = () => ({
+      mode: "conditions", conditions: conditions.read(),
+      folder: folder.value || undefined, markdown_only: markdown.checked || undefined
+    });
   }
   const save = toolNode("button", "Save filters");
   save.type = "submit";
   const close = dialog.querySelector("header button");
   fields.append(save);
   form.append(fields);
-  body.append(toolNode("p", "Base-wide filters still apply. Saving a change rewrites the YAML formatting and removes comments."), form);
+  const scope = view ? "Base-wide filters still apply." : "These filters apply to every view in this base.";
+  body.append(toolNode("p", scope + " Saving a change rewrites the YAML formatting and removes comments."), form);
   dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
   form.onsubmit = async event => {
     event.preventDefault();
@@ -897,6 +911,13 @@ async function toolOpenBase(path) {
         render();
       });
     });
+    const editBaseFilters = toolButton("Edit base filters", () => {
+      toolEditBaseFilters(base, null, async filters => {
+        base = await inv("set_vault_base_global_filters", { path, revision: base.revision, filters });
+        collapsed.clear();
+        render();
+      });
+    });
     const value = (row, column) => {
       if (column === "file.name") return row.name.split("/").pop();
       if (column === "file.path") return row.name + ".md";
@@ -985,7 +1006,7 @@ async function toolOpenBase(path) {
       render();
     };
     filter.oninput = render;
-    body.append(filter, choose, addView, edit, editSort, editColumns, editFilters, exportCsv, table);
+    body.append(filter, choose, addView, edit, editSort, editColumns, editFilters, editBaseFilters, exportCsv, table);
     render();
   } catch (error) { status(errStr(error)); }
 }
