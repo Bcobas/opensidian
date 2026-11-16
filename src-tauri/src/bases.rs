@@ -741,25 +741,42 @@ pub fn add_view(
 pub struct ViewSettings {
     name: String,
     make_first: bool,
+    limit: Option<String>,
 }
 
 pub fn set_view_settings(
     root: &Path, index: &Index, path: &str, revision: &str, id: usize, config: ViewSettings,
 ) -> Result<Base, String> {
     edit_views(root, index, path, revision, |views| {
-        let current = view_title(table_view(views, id)?);
-        let rename = config.name != current && config.name.trim() != current;
-        if rename {
+        let current = table_view(views, id)?;
+        let title = view_title(current);
+        let name = if config.name != title && config.name.trim() != title {
             let name = valid_view_name(&config.name)?;
             check_view_name_available(views, name, Some(id))?;
-            let Yaml::Hash(settings) = &mut views[id] else { return Err("Invalid table view".into()); };
+            Some(name)
+        } else {
+            None
+        };
+        let limit = config.limit.as_deref().map(|value| {
+            let value = value.trim();
+            if value.is_empty() { return Ok(None); }
+            value.parse::<i64>().ok().filter(|limit| *limit >= 0).map(Some)
+                .ok_or("Enter a whole number of results, or leave the limit blank")
+        }).transpose()?.filter(|limit| *limit != view_limit(current));
+        let Yaml::Hash(settings) = &mut views[id] else { return Err("Invalid table view".into()); };
+        if let Some(name) = name {
             settings.insert(Yaml::String("name".into()), Yaml::String(name.into()));
+        }
+        if let Some(limit) = limit {
+            let key = Yaml::String("limit".into());
+            if let Some(limit) = limit { settings.insert(key, Yaml::Integer(limit)); }
+            else { settings.remove(&key); }
         }
         let reorder = config.make_first && id != 0;
         if reorder {
             views[..=id].rotate_right(1);
         }
-        Ok(rename || reorder)
+        Ok(name.is_some() || limit.is_some() || reorder)
     })
 }
 
@@ -781,6 +798,10 @@ fn check_view_name_available(views: &[Yaml], name: &str, except: Option<usize>) 
 
 fn view_title(view: &Yaml) -> &str {
     view["name"].as_str().unwrap_or("Notes")
+}
+
+fn view_limit(view: &Yaml) -> Option<i64> {
+    view["limit"].as_i64().filter(|limit| *limit >= 0)
 }
 
 fn table_view(views: &[Yaml], id: usize) -> Result<&Yaml, String> {
@@ -876,7 +897,7 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
         let order = &view["groupOrder"];
         let (rows, groups) = grouped_rows(group_by.as_ref(), order, matching)?;
         let manual_groups = !order.is_badvalue();
-        let limit = view["limit"].as_i64().and_then(|limit| usize::try_from(limit).ok());
+        let limit = view_limit(view).and_then(|limit| usize::try_from(limit).ok());
         Ok(Table { id, title: view_title(view).to_owned(), columns, sort, limit, labels, rows, groups, group_by, manual_groups, filters })
     }).collect::<Result<Vec<_>, String>>()?;
     if views.is_empty() { return Err("This base has no supported table view".into()); }
@@ -1396,7 +1417,7 @@ views:
         let opened = open(&root, &index, path).unwrap();
         assert_eq!(opened.views[0].id, 1);
         assert_eq!(opened.views[1].id, 2);
-        let config = |name: &str, make_first| ViewSettings { name: name.into(), make_first };
+        let config = |name: &str, make_first| ViewSettings { name: name.into(), make_first, limit: None };
         let set = |revision: &str, id, config| set_view_settings(&root, &index, path, revision, id, config);
         assert!(set(&opened.revision, 2, config("  gALlery ", true)).is_err());
         assert!(set(&opened.revision, 2, config(" ", false)).is_err());
@@ -1423,5 +1444,17 @@ views:
         assert_eq!(after["views"][3], before["views"][3]);
         let no_op = set(&promoted.revision, 0, config("Focus", true)).unwrap();
         assert_eq!(no_op.revision, promoted.revision);
+        let limit_config = |value: &str| ViewSettings { limit: Some(value.into()), ..config("Focus", false) };
+        let saved = fs::read(&file).unwrap();
+        for invalid in ["-1", "2.5", "9223372036854775808"] {
+            assert!(set(&promoted.revision, 0, limit_config(invalid)).is_err());
+        }
+        assert_eq!(fs::read(&file).unwrap(), saved);
+        let limited = set(&promoted.revision, 0, limit_config("0")).unwrap();
+        assert_eq!(limited.views[0].limit, Some(0));
+        assert_eq!(open(&root, &index, path).unwrap().views[0].limit, Some(0));
+        let cleared = set(&limited.revision, 0, limit_config("")).unwrap();
+        assert_eq!(cleared.views[0].limit, None);
+        assert!(parse(&fs::read(&file).unwrap()).unwrap()["views"][0]["limit"].is_badvalue());
     }
 }

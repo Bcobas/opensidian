@@ -584,10 +584,17 @@ function toolEditBaseView(view, write) {
   first.checked = first.disabled = view.id === 0;
   const firstLabel = toolNode("label");
   firstLabel.append(first, document.createTextNode(first.checked ? " Opens first" : " Open this view first"));
+  const initialLimit = String(view.limit ?? "");
+  const limit = toolNode("input");
+  limit.inputMode = "numeric";
+  limit.placeholder = "All matching notes";
+  limit.value = initialLimit;
+  const limitLabel = toolNode("label", "Result limit");
+  limitLabel.append(limit);
   const save = toolNode("button", "Save view");
   save.type = "submit";
   const close = dialog.querySelector("header button");
-  fields.append(nameLabel, firstLabel, save);
+  fields.append(nameLabel, firstLabel, limitLabel, save);
   form.append(fields);
   body.append(toolNode("p", "Saving a change rewrites the YAML formatting and removes comments."), form);
   name.focus();
@@ -599,7 +606,10 @@ function toolEditBaseView(view, write) {
     fields.disabled = close.disabled = true;
     status("");
     try {
-      await write({ name: name.value, make_first: first.checked });
+      await write({
+        name: name.value, make_first: first.checked,
+        limit: limit.value === initialLimit ? undefined : limit.value
+      });
       dialog.close();
     } catch (error) {
       status(errStr(error));
