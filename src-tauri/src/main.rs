@@ -1351,10 +1351,20 @@ fn open_vault_base(v: State<Vault>, path: String) -> Result<bases::Base, String>
 
 #[cfg(windows)]
 #[tauri::command]
-fn set_vault_base_grouping(v: State<Vault>, path: String, revision: String, id: usize, group_by: Option<bases::GroupBy>) -> Result<bases::Base, String> {
+fn set_vault_base_grouping(v: State<Vault>, path: String, revision: String, id: usize, group_by: Option<bases::PropertyOrder>) -> Result<bases::Base, String> {
     let root = cur_vault(&v).ok_or("No vault open")?;
     let index = v.index.lock().map_err(|error| error.to_string())?;
     bases::set_grouping(&root, &index, &path, &revision, id, group_by)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn set_vault_base_sorting(
+    v: State<Vault>, path: String, revision: String, id: usize, sort: Vec<bases::PropertyOrder>,
+) -> Result<bases::Base, String> {
+    let root = cur_vault(&v).ok_or("No vault open")?;
+    let index = v.index.lock().map_err(|error| error.to_string())?;
+    bases::set_sorting(&root, &index, &path, &revision, id, sort)
 }
 
 #[cfg(windows)]
@@ -7320,6 +7330,7 @@ fn main() {
             #[cfg(windows)] create_vault_base,
             #[cfg(windows)] open_vault_base,
             #[cfg(windows)] set_vault_base_grouping,
+            #[cfg(windows)] set_vault_base_sorting,
             #[cfg(windows)] export_vault_base_csv,
             #[cfg(windows)] canvas_version_history,
             #[cfg(windows)] read_canvas_revision,

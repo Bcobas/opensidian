@@ -23,17 +23,17 @@ pub struct NewBase {
     pub folder: Option<String>,
     #[serde(default)]
     pub conditions: Vec<Condition>,
-    pub group_by: Option<GroupBy>,
+    pub group_by: Option<PropertyOrder>,
 }
 
 #[derive(Deserialize, Serialize, PartialEq)]
-pub struct GroupBy {
+pub struct PropertyOrder {
     property: String,
-    direction: GroupDirection,
+    direction: Direction,
 }
 
 #[derive(Deserialize, Serialize, PartialEq)]
-enum GroupDirection {
+enum Direction {
     #[serde(rename = "ASC")]
     Ascending,
     #[serde(rename = "DESC")]
@@ -108,13 +108,12 @@ pub struct Table {
     id: usize,
     title: String,
     columns: Vec<String>,
-    sort: String,
-    descending: bool,
+    sort: Vec<PropertyOrder>,
     limit: Option<usize>,
     labels: BTreeMap<String, String>,
     rows: Vec<note_views::Row>,
     groups: Option<Vec<TableGroup>>,
-    group_by: Option<GroupBy>,
+    group_by: Option<PropertyOrder>,
     manual_groups: bool,
 }
 
@@ -404,7 +403,7 @@ fn group_order(a: &Yaml, b: &Yaml) -> Ordering {
     }).then_with(|| a.cmp(b))
 }
 
-fn grouping(view: &Yaml) -> Result<Option<GroupBy>, String> {
+fn grouping(view: &Yaml) -> Result<Option<PropertyOrder>, String> {
     let by = &view["groupBy"];
     if by.is_badvalue() {
         if !view["groupOrder"].is_badvalue() { return Err("Group order requires a grouping property".into()); }
@@ -414,23 +413,39 @@ fn grouping(view: &Yaml) -> Result<Option<GroupBy>, String> {
     let property = if property.contains('.') { property.to_owned() } else { format!("note.{property}") };
     if !column(&property) { return Err("Unsupported grouping property".into()); }
     let direction = match by["direction"].as_str() {
-        Some("DESC") => GroupDirection::Descending,
-        Some("ASC") => GroupDirection::Ascending,
-        None if by["direction"].is_badvalue() => GroupDirection::Ascending,
+        Some("DESC") => Direction::Descending,
+        Some("ASC") => Direction::Ascending,
+        None if by["direction"].is_badvalue() => Direction::Ascending,
         _ => return Err("Unsupported group direction".into()),
     };
-    Ok(Some(GroupBy { property, direction }))
+    Ok(Some(PropertyOrder { property, direction }))
+}
+
+fn sorting(view: &Yaml) -> Result<Vec<PropertyOrder>, String> {
+    let sort = &view["sort"];
+    if sort.is_badvalue() { return Ok(Vec::new()); }
+    sort.as_vec().ok_or("Invalid base sort")?.iter().map(|key| {
+        let property = key["property"].as_str().ok_or("Invalid base sort property")?;
+        let property = if property.contains('.') { property.to_owned() } else { format!("note.{property}") };
+        if !column(&property) { return Err("Unsupported base sort property".into()); }
+        let direction = match key["direction"].as_str() {
+            Some("ASC") => Direction::Ascending,
+            Some("DESC") => Direction::Descending,
+            _ => return Err("Unsupported base sort direction".into()),
+        };
+        Ok(PropertyOrder { property, direction })
+    }).collect()
 }
 
 fn grouped_rows<'a>(
-    grouping: Option<&GroupBy>,
+    grouping: Option<&PropertyOrder>,
     order: &Yaml,
     docs: impl Iterator<Item = &'a (&'a str, note_views::Row, yaml_rust2::yaml::Hash)>,
 ) -> Result<(Vec<note_views::Row>, Option<Vec<TableGroup>>), String> {
     let Some(grouping) = grouping else {
         return Ok((docs.map(|(_, row, _)| row.clone()).collect(), None));
     };
-    let descending = grouping.direction == GroupDirection::Descending;
+    let descending = grouping.direction == Direction::Descending;
     let mut buckets = BTreeMap::<_, Vec<_>>::new();
     for (name, row, properties) in docs {
         buckets.entry(group_value(name, properties, &grouping.property)).or_default().push(row.clone());
@@ -483,7 +498,48 @@ pub fn open(root: &Path, index: &Index, path: &str) -> Result<Base, String> {
 }
 
 pub fn set_grouping(
-    root: &Path, index: &Index, path: &str, revision: &str, id: usize, group_by: Option<GroupBy>,
+    root: &Path, index: &Index, path: &str, revision: &str, id: usize, group_by: Option<PropertyOrder>,
+) -> Result<Base, String> {
+    edit_view(root, index, path, revision, id, |view| {
+        if grouping(view)? == group_by && view["groupOrder"].is_badvalue() { return Ok(()); }
+        let Yaml::Hash(settings) = view else { return Err("Invalid table view".into()); };
+        let key = Yaml::String("groupBy".into());
+        if let Some(group) = group_by {
+            if !column(&group.property) { return Err("Choose a supported grouping property".into()); }
+            let group = serde_json::to_vec(&group).map_err(|error| error.to_string())?;
+            settings.insert(key, parse(&group)?);
+        } else {
+            settings.remove(&key);
+        }
+        settings.remove(&Yaml::String("groupOrder".into()));
+        Ok(())
+    })
+}
+
+pub fn set_sorting(
+    root: &Path, index: &Index, path: &str, revision: &str, id: usize, sort: Vec<PropertyOrder>,
+) -> Result<Base, String> {
+    edit_view(root, index, path, revision, id, |view| {
+        if sorting(view)? == sort { return Ok(()); }
+        let mut seen = BTreeSet::new();
+        if !sort.iter().all(|key| column(&key.property) && seen.insert(&key.property)) {
+            return Err("Choose distinct supported sorting properties".into());
+        }
+        let Yaml::Hash(settings) = view else { return Err("Invalid table view".into()); };
+        let key = Yaml::String("sort".into());
+        if sort.is_empty() {
+            settings.remove(&key);
+        } else {
+            let sort = serde_json::to_vec(&sort).map_err(|error| error.to_string())?;
+            settings.insert(key, parse(&sort)?);
+        }
+        Ok(())
+    })
+}
+
+fn edit_view(
+    root: &Path, index: &Index, path: &str, revision: &str, id: usize,
+    edit: impl FnOnce(&mut Yaml) -> Result<(), String>,
 ) -> Result<Base, String> {
     let path = base_path(path)?;
     let vault = Vault::open(root).map_err(|error| error.to_string())?;
@@ -497,19 +553,11 @@ pub fn set_grouping(
     };
     let view = views.get_mut(id).filter(|view| view["type"].as_str() == Some("table"))
         .ok_or("The table view could not be found")?;
-    if grouping(view)? == group_by && view["groupOrder"].is_badvalue() {
+    let previous = view.clone();
+    edit(view)?;
+    if *view == previous {
         return render_base(&base, index, revision.into());
     }
-    let Yaml::Hash(settings) = view else { return Err("Invalid table view".into()); };
-    let key = Yaml::String("groupBy".into());
-    if let Some(group) = group_by {
-        if !column(&group.property) { return Err("Choose a supported grouping property".into()); }
-        let group = serde_json::to_vec(&group).map_err(|error| error.to_string())?;
-        settings.insert(key, parse(&group)?);
-    } else {
-        settings.remove(&key);
-    }
-    settings.remove(&Yaml::String("groupOrder".into()));
     let mut yaml = String::new();
     YamlEmitter::new(&mut yaml).dump(&base).map_err(|error| error.to_string())?;
     yaml.push('\n');
@@ -544,23 +592,7 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
                     .ok_or("This base uses an unsupported column")).collect::<Result<Vec<_>, _>>()?
         };
         if columns.is_empty() { columns.push(FILE_NAME.into()); }
-        let (sort, descending) = if view["sort"].is_badvalue() {
-            (columns[0].clone(), false)
-        } else {
-            let keys = view["sort"].as_vec().ok_or("Invalid base sort")?;
-            match keys.as_slice() {
-                [] => (columns[0].clone(), false),
-                [key] => {
-                    let name = key["property"].as_str().filter(|key| column(key)).ok_or("Unsupported base sort property")?;
-                    let descending = match key["direction"].as_str() {
-                        Some("DESC") => true, Some("ASC") => false,
-                        _ => return Err("Unsupported base sort direction".into()),
-                    };
-                    (name.to_owned(), descending)
-                }
-                _ => return Err("Sorting by multiple properties is not supported yet".into()),
-            }
-        };
+        let sort = sorting(view)?;
         let filter = Filter::parse(&view["filters"], 0)?;
         let matching = docs.iter().filter(|(name, _, properties)| filter.matches(name, properties));
         let group_by = grouping(view)?;
@@ -574,7 +606,7 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
                 .or_else(|| key.strip_prefix("note.").and_then(|key| props[key]["displayName"].as_str()))?;
             Some((key.clone(), label.to_owned()))
         }).collect();
-        Ok(Table { id, title: view["name"].as_str().unwrap_or("Notes").to_owned(), columns, sort, descending, limit, labels, rows, groups, group_by, manual_groups })
+        Ok(Table { id, title: view["name"].as_str().unwrap_or("Notes").to_owned(), columns, sort, limit, labels, rows, groups, group_by, manual_groups })
     }).collect::<Result<Vec<_>, String>>()?;
     if views.is_empty() { return Err("This base has no supported table view".into()); }
     Ok(Base { revision, properties, views })
@@ -605,8 +637,8 @@ mod tests {
         let mut index = Index::build(&root);
         let tables = open(&root, &index, "Project/Work.base").unwrap().views;
         assert_eq!(tables[0].columns, [FILE_NAME, "note.priority"]);
-        assert_eq!(tables[0].sort, "note.priority");
-        assert!(tables[0].descending);
+        assert_eq!(tables[0].sort[0].property, "note.priority");
+        assert!(tables[0].sort[0].direction == Direction::Descending);
         assert_eq!(tables[0].rows.len(), 2);
         index.upsert("Project/Sub/Alpha", "---\npriority: 7\n---\n");
         let tables = open(&root, &index, "Project/Work.base").unwrap().views;
@@ -640,7 +672,7 @@ mod tests {
         assert!(open(&root, &index, "Filtered.base").unwrap().views[0].rows.is_empty());
 
         create(&root, "Grouped.base", NewBase {
-            group_by: Some(GroupBy { property: "note.priority".into(), direction: GroupDirection::Descending }),
+            group_by: Some(PropertyOrder { property: "note.priority".into(), direction: Direction::Descending }),
             ..config()
         }).unwrap();
         let grouped = open(&root, &index, "Grouped.base").unwrap().views;
@@ -701,7 +733,7 @@ views:
         assert_eq!(opened.views[0].id, 1);
         assert!(opened.views[0].manual_groups);
         assert!(opened.properties.contains("status"));
-        let group = || GroupBy { property: "note.status".into(), direction: GroupDirection::Ascending };
+        let group = || PropertyOrder { property: "note.status".into(), direction: Direction::Ascending };
         assert!(set_grouping(&root, &index, path, &opened.revision, 0, Some(group())).is_err());
         assert_eq!(fs::read(&file).unwrap(), yaml.as_bytes());
         let saved = set_grouping(&root, &index, path, &opened.revision, 1, Some(group())).unwrap();
@@ -735,6 +767,54 @@ views:
         for expr in ["file.name == 1", "priority > \"3\"", "note.done == true || true", "note.priority == 1e999"] {
             assert!(Filter::parse(&Yaml::String(expr.into()), 0).is_err(), "{expr}");
         }
+    }
+
+    #[test]
+    fn loads_and_saves_sort_rules_in_priority_order() {
+        let root = std::env::temp_dir().join(format!("opensidian-base-sort-{}", opensidian_lib::os_random_hex().unwrap()));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let path = "Notes.base";
+        let yaml = r#"views:
+  - type: table
+    name: Projects
+    sort:
+      - {property: priority, direction: DESC}
+      - {property: note.date, direction: ASC}
+    groupBy: {property: note.status, direction: ASC}
+    groupOrder: [todo, done]
+  - type: table
+    name: All notes
+"#;
+        let file = root.join(path);
+        fs::write(&file, yaml).unwrap();
+        let index = Index::build(&root);
+        let opened = open(&root, &index, path).unwrap();
+        let sort = &opened.views[0].sort;
+        assert_eq!(sort.iter().map(|rule| rule.property.as_str()).collect::<Vec<_>>(), ["note.priority", "note.date"]);
+        assert!(sort[0].direction == Direction::Descending);
+        assert!(opened.views[1].sort.is_empty());
+        let rule = |property: &str, direction| PropertyOrder { property: property.into(), direction };
+        let invalid = vec![rule("note.date", Direction::Ascending), rule("note.date", Direction::Descending)];
+        assert!(set_sorting(&root, &index, path, &opened.revision, 0, invalid).is_err());
+        assert_eq!(fs::read(&file).unwrap(), yaml.as_bytes());
+        let changed = vec![rule("note.date", Direction::Descending), rule("note.priority", Direction::Ascending)];
+        let updated = set_sorting(&root, &index, path, &opened.revision, 0, changed).unwrap();
+        let reopened = open(&root, &index, path).unwrap();
+        assert_eq!(serde_json::to_value(&reopened.views[0].sort).unwrap(), serde_json::json!([
+            { "property": "note.date", "direction": "DESC" },
+            { "property": "note.priority", "direction": "ASC" },
+        ]));
+        let old = parse(yaml.as_bytes()).unwrap();
+        let current = parse(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(current["views"][0]["groupOrder"], old["views"][0]["groupOrder"]);
+        assert_eq!(current["views"][1], old["views"][1]);
+        assert!(set_sorting(&root, &index, path, &opened.revision, 0, vec![]).is_err());
+        assert!(set_sorting(&root, &index, path, &updated.revision, 0, vec![]).unwrap().views[0].sort.is_empty());
     }
 
     #[test]

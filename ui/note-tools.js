@@ -507,13 +507,92 @@ async function toolCreateBase(folder, preset) {
   } catch (error) { status(errStr(error)); }
 }
 
-function toolEditBaseGrouping(base, view, write) {
-  const { dialog, body, status } = toolDialog("Edit grouping · " + view.title);
+function baseViewPropertyOptions(base, view) {
   const properties = new Set(base.properties);
-  for (const key of [...view.columns, view.group_by?.property]) {
+  for (const key of [...view.columns, view.group_by?.property, ...view.sort.map(rule => rule.property)]) {
     if (key?.startsWith("note.")) properties.add(key.slice(5));
   }
-  const grouping = baseGroupingFields(basePropertyOptions([...properties].sort()), view.group_by, view.manual_groups);
+  return basePropertyOptions([...properties].sort()).map(([key, name]) => [key, view.labels?.[key] ?? name]);
+}
+
+function toolEditBaseSorting(base, view, write) {
+  const { dialog, body, status } = toolDialog("Edit sorting · " + view.title);
+  const options = baseViewPropertyOptions(base, view);
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const rules = toolNode("div");
+  const controls = [];
+  const read = () => controls.map(({ property, direction }) => ({ property: property.value, direction: direction.value }));
+  const add = toolButton("Add sort rule", () => {
+    const used = new Set(read().map(rule => rule.property));
+    const next = options.find(([key]) => !used.has(key));
+    if (next) appendRule({ property: next[0], direction: "ASC" }).focus();
+  });
+  const updateAdd = () => {
+    add.disabled = new Set(read().map(rule => rule.property)).size >= options.length;
+  };
+  const refresh = () => {
+    rules.replaceChildren(...controls.map(control => control.row));
+    controls.forEach((control, index) => {
+      control.up.disabled = index === 0;
+      control.down.disabled = index === controls.length - 1;
+    });
+    updateAdd();
+  };
+  const move = (control, offset) => {
+    const index = controls.indexOf(control);
+    controls.splice(index, 1);
+    controls.splice(index + offset, 0, control);
+    refresh();
+    control.property.focus();
+  };
+  function appendRule(rule) {
+    const row = toolNode("div");
+    const property = toolSelect("Sort property", options);
+    property.value = rule.property;
+    property.onchange = updateAdd;
+    const direction = toolSelect("Sort direction", [["ASC", "Ascending"], ["DESC", "Descending"]]);
+    direction.value = rule.direction;
+    const up = toolButton("Move up", () => move(control, -1));
+    const down = toolButton("Move down", () => move(control, 1));
+    const remove = toolButton("Remove", () => {
+      const index = controls.indexOf(control);
+      controls.splice(index, 1);
+      refresh();
+      (controls[index]?.property ?? controls.at(-1)?.property ?? add).focus();
+    });
+    const control = { row, property, direction, up, down };
+    row.append(property, direction, up, down, remove);
+    controls.push(control);
+    refresh();
+    return property;
+  }
+  view.sort.forEach(appendRule);
+  const save = toolNode("button", "Save sorting");
+  save.type = "submit";
+  const close = dialog.querySelector("header button");
+  fields.append(toolNode("legend", "Sort rules in priority order"), rules, add, save);
+  form.append(fields);
+  body.append(toolNode("p", "Saving a change rewrites the YAML formatting and removes comments."), form);
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    const sort = read();
+    if (new Set(sort.map(rule => rule.property)).size !== sort.length) { status("Choose a different property for each rule."); return; }
+    fields.disabled = close.disabled = true;
+    status("");
+    try { await write(sort); dialog.close(); }
+    catch (error) {
+      status(errStr(error));
+      fields.disabled = close.disabled = false;
+    }
+  };
+}
+
+function toolEditBaseGrouping(base, view, write) {
+  const { dialog, body, status } = toolDialog("Edit grouping · " + view.title);
+  const grouping = baseGroupingFields(baseViewPropertyOptions(base, view), view.group_by, view.manual_groups);
   const form = toolNode("form");
   const fields = toolNode("fieldset");
   const save = toolNode("button", "Save grouping");
@@ -597,12 +676,22 @@ async function toolOpenBase(path) {
     const collapsed = new Set();
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     const activeView = () => base.views[Number(choose.value)];
-    let { sort, descending } = activeView();
+    const defaultSort = view => view.sort.length ? view.sort : [{ property: view.columns[0], direction: "ASC" }];
+    let sort = defaultSort(activeView());
     let results = [];
     const edit = toolButton("Edit grouping", () => {
       const view = activeView();
       toolEditBaseGrouping(base, view, async groupBy => {
         base = await inv("set_vault_base_grouping", { path, revision: base.revision, id: view.id, groupBy });
+        collapsed.clear();
+        render();
+      });
+    });
+    const editSort = toolButton("Edit sorting", () => {
+      const view = activeView();
+      toolEditBaseSorting(base, view, async rules => {
+        base = await inv("set_vault_base_sorting", { path, revision: base.revision, id: view.id, sort: rules });
+        sort = defaultSort(activeView());
         collapsed.clear();
         render();
       });
@@ -629,10 +718,11 @@ async function toolOpenBase(path) {
       for (const key of view.columns) {
         const cell = toolNode("th");
         cell.scope = "col";
-        cell.setAttribute("aria-sort", key === sort ? (descending ? "descending" : "ascending") : "none");
+        const primary = sort[0];
+        cell.setAttribute("aria-sort", key === primary.property ? (primary.direction === "DESC" ? "descending" : "ascending") : "none");
         cell.append(toolButton(label(view, key), () => {
-          descending = sort === key ? !descending : false;
-          sort = key;
+          const direction = primary.property === key && primary.direction === "ASC" ? "DESC" : "ASC";
+          sort = [{ property: key, direction }, ...sort.filter(rule => rule.property !== key)];
           render();
         }));
         head.append(cell);
@@ -640,7 +730,13 @@ async function toolOpenBase(path) {
       while (table.tBodies.length) table.tBodies[0].remove();
       for (const group of view.groups ?? [{ rows: view.rows }]) {
         const matches = group.rows.filter(row => view.columns.some(key => value(row, key).toLocaleLowerCase().includes(query)));
-        matches.sort((a, b) => (descending ? -1 : 1) * collator.compare(value(a, sort), value(b, sort)) || collator.compare(a.name, b.name));
+        matches.sort((a, b) => {
+          for (const { property, direction } of sort) {
+            const order = collator.compare(value(a, property), value(b, property));
+            if (order) return direction === "DESC" ? -order : order;
+          }
+          return collator.compare(a.name, b.name);
+        });
         const visible = matches.slice(0, (view.limit ?? Infinity) - results.length);
         if (!visible.length && (query || group.rows.length)) continue;
         const data = table.createTBody();
@@ -681,13 +777,11 @@ async function toolOpenBase(path) {
       status(results.length ? `${results.length} notes` : "No notes match.");
     };
     choose.onchange = () => {
-      const view = activeView();
-      sort = view.sort;
-      descending = view.descending;
+      sort = defaultSort(activeView());
       render();
     };
     filter.oninput = render;
-    body.append(filter, choose, edit, exportCsv, table);
+    body.append(filter, choose, edit, editSort, exportCsv, table);
     render();
   } catch (error) { status(errStr(error)); }
 }
