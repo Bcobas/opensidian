@@ -381,6 +381,51 @@ function baseGroupingFields(options, current, manual = false) {
   };
 }
 
+function baseConditionFields(properties) {
+  const conditions = [];
+  const filters = toolNode("fieldset");
+  filters.append(toolNode("legend", "Property filters"));
+  const addCondition = toolButton("Add condition", () => {
+    if (conditions.length >= 16) return;
+    const group = toolNode("div");
+    const property = toolSelect("Filter property", properties.map(key => [key, key]));
+    const kind = toolSelect("Value type", [["text", "Text"], ["number", "Number"], ["checkbox", "Checkbox"]]);
+    const operator = toolSelect("Comparison", [["eq", "Equals"], ["ne", "Does not equal"],
+      ["gt", "Greater than"], ["ge", "At least"], ["lt", "Less than"], ["le", "At most"]]);
+    const value = toolNode("input");
+    value.placeholder = "Filter value";
+    value.setAttribute("aria-label", "Filter value");
+    const checkbox = toolSelect("Checkbox value", [["true", "True"], ["false", "False"]]);
+    kind.onchange = () => {
+      const isNumber = kind.value === "number";
+      for (const option of operator.options) option.disabled = !isNumber && !["eq", "ne"].includes(option.value);
+      if (operator.selectedOptions[0]?.disabled) operator.value = "eq";
+      value.hidden = kind.value === "checkbox";
+      value.required = isNumber;
+      value.inputMode = isNumber ? "decimal" : "text";
+      checkbox.hidden = !value.hidden;
+    };
+    kind.onchange();
+    const condition = () => ({
+      property: property.value, kind: kind.value, operator: operator.value,
+      value: kind.value === "checkbox" ? checkbox.value : value.value
+    });
+    const remove = toolButton("Remove condition", () => {
+      conditions.splice(conditions.indexOf(condition), 1);
+      group.remove();
+      addCondition.disabled = false;
+      addCondition.focus();
+    });
+    group.append(property, kind, operator, value, checkbox, remove);
+    filters.insertBefore(group, addCondition);
+    conditions.push(condition);
+    addCondition.disabled = conditions.length >= 16;
+    property.focus();
+  });
+  filters.append(addCondition);
+  return { filters, read: () => conditions.map(read => read()) };
+}
+
 async function toolCreateBase(folder, preset) {
   const { dialog, body, status } = toolDialog("Create a base");
   try {
@@ -414,47 +459,7 @@ async function toolCreateBase(folder, preset) {
     scope.type = "checkbox";
     const scopeLabel = toolNode("label");
     scopeLabel.append(scope, document.createTextNode(" Include only notes in this folder and its subfolders"));
-    const conditions = [];
-    const filters = toolNode("fieldset");
-    filters.append(toolNode("legend", "Property filters"));
-    const addCondition = toolButton("Add condition", () => {
-      if (conditions.length >= 16) return;
-      const group = toolNode("div");
-      const property = toolSelect("Filter property", properties.map(key => [key, key]));
-      const kind = toolSelect("Value type", [["text", "Text"], ["number", "Number"], ["checkbox", "Checkbox"]]);
-      const operator = toolSelect("Comparison", [["eq", "Equals"], ["ne", "Does not equal"],
-        ["gt", "Greater than"], ["ge", "At least"], ["lt", "Less than"], ["le", "At most"]]);
-      const value = toolNode("input");
-      value.placeholder = "Filter value";
-      value.setAttribute("aria-label", "Filter value");
-      const checkbox = toolSelect("Checkbox value", [["true", "True"], ["false", "False"]]);
-      kind.onchange = () => {
-        const isNumber = kind.value === "number";
-        for (const option of operator.options) option.disabled = !isNumber && !["eq", "ne"].includes(option.value);
-        if (operator.selectedOptions[0]?.disabled) operator.value = "eq";
-        value.hidden = kind.value === "checkbox";
-        value.required = isNumber;
-        value.inputMode = isNumber ? "decimal" : "text";
-        checkbox.hidden = !value.hidden;
-      };
-      kind.onchange();
-      const condition = () => ({
-        property: property.value, kind: kind.value, operator: operator.value,
-        value: kind.value === "checkbox" ? checkbox.value : value.value
-      });
-      const remove = toolButton("Remove condition", () => {
-        conditions.splice(conditions.indexOf(condition), 1);
-        group.remove();
-        addCondition.disabled = false;
-        addCondition.focus();
-      });
-      group.append(property, kind, operator, value, checkbox, remove);
-      filters.insertBefore(group, addCondition);
-      conditions.push(condition);
-      addCondition.disabled = conditions.length >= 16;
-      property.focus();
-    });
-    filters.append(addCondition);
+    const conditions = baseConditionFields(properties);
     const save = toolNode("button", "Create base");
     save.type = "submit";
     const close = dialog.querySelector("header button");
@@ -475,7 +480,7 @@ async function toolCreateBase(folder, preset) {
     columnLabel.append(columns);
     fields.append(filename, columnLabel, sort, direction, grouping.label, grouping.groupDirection);
     if (folder) fields.append(scopeLabel);
-    if (properties.length) fields.append(filters);
+    if (properties.length) fields.append(conditions.filters);
     fields.append(save);
     form.append(fields);
     body.append(form);
@@ -488,7 +493,7 @@ async function toolCreateBase(folder, preset) {
       if (!name || /[\\/]/.test(name)) { status("Enter a file name without a folder path."); return; }
       const path = (folder ? folder + "/" : "") + name + ".base";
       const config = { columns: selected().map(([key]) => key), sort: sort.value, descending: direction.value === "desc",
-        folder: folder && scope.checked ? folder : null, conditions: conditions.map(read => read()),
+        folder: folder && scope.checked ? folder : null, conditions: conditions.read(),
         group_by: grouping.read() };
       fields.disabled = close.disabled = true;
       status("");
@@ -513,6 +518,48 @@ function baseViewPropertyOptions(base, view) {
     if (key?.startsWith("note.")) properties.add(key.slice(5));
   }
   return basePropertyOptions([...properties].sort()).map(([key, name]) => [key, view.labels?.[key] ?? name]);
+}
+
+function toolAddBaseView(base, view, write) {
+  const { dialog, body, status } = toolDialog("Add table view");
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const name = toolNode("input");
+  name.required = true;
+  const nameLabel = toolNode("label", "View name");
+  nameLabel.append(name);
+  const copy = toolNode("input");
+  copy.type = "checkbox";
+  const copyLabel = toolNode("label");
+  copyLabel.append(copy, document.createTextNode(" Copy settings from " + view.title));
+  const properties = baseViewPropertyOptions(base, view)
+    .filter(([key]) => key.startsWith("note.")).map(([key]) => key.slice(5));
+  const conditions = baseConditionFields(properties);
+  const save = toolNode("button", "Add view");
+  save.type = "submit";
+  const close = dialog.querySelector("header button");
+  fields.append(nameLabel, copyLabel);
+  if (properties.length) fields.append(conditions.filters);
+  fields.append(save);
+  form.append(fields);
+  body.append(toolNode("p", "Adding a view rewrites the YAML formatting and removes comments."), form);
+  name.focus();
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    const title = name.value.trim();
+    if (!title) { status("Enter a view name."); return; }
+    fields.disabled = close.disabled = true;
+    status("");
+    try {
+      await write({ name: title, copy_from: copy.checked ? view.id : null, conditions: conditions.read() });
+      dialog.close();
+    } catch (error) {
+      status(errStr(error));
+      fields.disabled = close.disabled = false;
+    }
+  };
 }
 
 function toolEditBaseColumns(base, view, write) {
@@ -752,6 +799,21 @@ async function toolOpenBase(path) {
     const defaultSort = view => view.sort.length ? view.sort : [{ property: view.columns[0], direction: "ASC" }];
     let sortOverride = null;
     let results = [];
+    const addView = toolButton("Add view", () => {
+      toolAddBaseView(base, activeView(), async config => {
+        base = await inv("add_vault_base_view", { path, revision: base.revision, config });
+        const index = base.views.length - 1;
+        const option = toolNode("option", base.views[index].title);
+        option.value = String(index);
+        choose.append(option);
+        choose.value = option.value;
+        choose.hidden = false;
+        filter.value = "";
+        sortOverride = null;
+        collapsed.clear();
+        render();
+      });
+    });
     const edit = toolButton("Edit grouping", () => {
       const view = activeView();
       toolEditBaseGrouping(base, view, async groupBy => {
@@ -793,6 +855,8 @@ async function toolOpenBase(path) {
     });
     const render = () => {
       const view = activeView();
+      addView.disabled = !base.can_add_view;
+      addView.title = addView.disabled ? "This base already has sixteen views." : "";
       const sort = sortOverride ?? defaultSort(view);
       const query = filter.value.trim().toLocaleLowerCase();
       results = [];
@@ -863,7 +927,7 @@ async function toolOpenBase(path) {
       render();
     };
     filter.oninput = render;
-    body.append(filter, choose, edit, editSort, editColumns, exportCsv, table);
+    body.append(filter, choose, addView, edit, editSort, editColumns, exportCsv, table);
     render();
   } catch (error) { status(errStr(error)); }
 }

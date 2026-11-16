@@ -14,6 +14,7 @@ use crate::{note_views, safe_rel, vaultfs::Vault, Index};
 const MAX_BYTES: u64 = 128 * 1024;
 const MAX_CSV_BYTES: usize = 32 * 1024 * 1024;
 const MAX_COLUMNS: usize = 128;
+const MAX_VIEWS: usize = 16;
 const FILE_NAME: &str = "file.name";
 
 #[derive(Deserialize)]
@@ -25,6 +26,14 @@ pub struct NewBase {
     #[serde(default)]
     pub conditions: Vec<Condition>,
     pub group_by: Option<PropertyOrder>,
+}
+
+#[derive(Deserialize)]
+pub struct NewView {
+    name: String,
+    copy_from: Option<usize>,
+    #[serde(default)]
+    conditions: Vec<Condition>,
 }
 
 #[derive(Deserialize, Serialize, PartialEq)]
@@ -97,10 +106,16 @@ impl Condition {
     }
 }
 
+fn condition_expressions(conditions: &[Condition]) -> Result<Vec<String>, String> {
+    if conditions.len() > 16 { return Err("A base can save up to sixteen property conditions at a time".into()); }
+    conditions.iter().map(Condition::expression).collect()
+}
+
 #[derive(Serialize)]
 pub struct Base {
     revision: String,
     properties: BTreeSet<String>,
+    can_add_view: bool,
     views: Vec<Table>,
 }
 
@@ -256,8 +271,7 @@ pub fn create(root: &Path, path: &str, config: NewBase) -> Result<(), String> {
         let literal = serde_json::to_string(&opensidian_lib::vault_path_string(&folder)).map_err(|error| error.to_string())?;
         filters.push(format!("file.inFolder({literal})"));
     }
-    if config.conditions.len() > 16 { return Err("A base can save up to sixteen property conditions".into()); }
-    for condition in config.conditions { filters.push(condition.expression()?); }
+    filters.extend(condition_expressions(&config.conditions)?);
     let mut base = serde_json::json!({
         "filters": { "and": filters },
         "views": [{
@@ -575,9 +589,62 @@ pub fn set_columns(
     })
 }
 
+pub fn add_view(
+    root: &Path, index: &Index, path: &str, revision: &str, config: NewView,
+) -> Result<Base, String> {
+    let name = config.name.trim();
+    if name.is_empty() || name.chars().count() > 128 || name.chars().any(char::is_control) {
+        return Err("Enter a view name between one and 128 characters".into());
+    }
+    let conditions = condition_expressions(&config.conditions)?;
+    edit_views(root, index, path, revision, |views| {
+        if views.len() >= MAX_VIEWS { return Err("A base can contain up to sixteen views".into()); }
+        let normalized = name.to_lowercase();
+        if views.iter().any(|view| view_title(view).trim().to_lowercase() == normalized) {
+            return Err("A view with this name already exists".into());
+        }
+        let mut settings = match config.copy_from {
+            Some(id) => table_view(views, id)?.as_hash().ok_or("Invalid table view")?.clone(),
+            None => yaml_rust2::yaml::Hash::new(),
+        };
+        settings.insert(Yaml::String("type".into()), Yaml::String("table".into()));
+        settings.insert(Yaml::String("name".into()), Yaml::String(name.into()));
+        if !conditions.is_empty() {
+            let filters = Yaml::String("filters".into());
+            let mut combined: Vec<_> = settings.remove(&filters).into_iter().filter(|filter| !filter.is_null()).collect();
+            combined.extend(conditions.into_iter().map(Yaml::String));
+            let mut all = yaml_rust2::yaml::Hash::new();
+            all.insert(Yaml::String("and".into()), Yaml::Array(combined));
+            settings.insert(filters, Yaml::Hash(all));
+        }
+        views.push(Yaml::Hash(settings));
+        Ok(true)
+    })
+}
+
+fn view_title(view: &Yaml) -> &str {
+    view["name"].as_str().unwrap_or("Notes")
+}
+
+fn table_view(views: &[Yaml], id: usize) -> Result<&Yaml, String> {
+    views.get(id).filter(|view| view["type"].as_str() == Some("table"))
+        .ok_or_else(|| "The table view could not be found".into())
+}
+
 fn edit_view(
     root: &Path, index: &Index, path: &str, revision: &str, id: usize,
     edit: impl FnOnce(&mut Yaml) -> Result<(), String>,
+) -> Result<Base, String> {
+    edit_views(root, index, path, revision, |views| {
+        let previous = table_view(views, id)?.clone();
+        edit(&mut views[id])?;
+        Ok(views[id] != previous)
+    })
+}
+
+fn edit_views(
+    root: &Path, index: &Index, path: &str, revision: &str,
+    edit: impl FnOnce(&mut Vec<Yaml>) -> Result<bool, String>,
 ) -> Result<Base, String> {
     let path = base_path(path)?;
     let vault = Vault::open(root).map_err(|error| error.to_string())?;
@@ -589,11 +656,7 @@ fn edit_view(
     let Some(Yaml::Array(views)) = root.get_mut(&Yaml::String("views".into())) else {
         return Err("Invalid base views".into());
     };
-    let view = views.get_mut(id).filter(|view| view["type"].as_str() == Some("table"))
-        .ok_or("The table view could not be found")?;
-    let previous = view.clone();
-    edit(view)?;
-    if *view == previous {
+    if !edit(views)? {
         return render_base(&base, index, revision.into());
     }
     let mut yaml = String::new();
@@ -610,8 +673,9 @@ fn edit_view(
 
 fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, String> {
     let global = Filter::parse(&base["filters"], 0)?;
-    let views = base["views"].as_vec().filter(|views| !views.is_empty() && views.len() <= 16)
+    let views = base["views"].as_vec().filter(|views| !views.is_empty() && views.len() <= MAX_VIEWS)
         .ok_or("The base must contain between one and sixteen views")?;
+    let can_add_view = views.len() < MAX_VIEWS;
     let mut properties = BTreeSet::new();
     let docs: Vec<_> = index.docs().filter_map(|(name, text, _)| {
         let note = note_views::properties(text);
@@ -645,10 +709,10 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
         let (rows, groups) = grouped_rows(group_by.as_ref(), order, matching)?;
         let manual_groups = !order.is_badvalue();
         let limit = view["limit"].as_i64().and_then(|limit| usize::try_from(limit).ok());
-        Ok(Table { id, title: view["name"].as_str().unwrap_or("Notes").to_owned(), columns, sort, limit, labels, rows, groups, group_by, manual_groups })
+        Ok(Table { id, title: view_title(view).to_owned(), columns, sort, limit, labels, rows, groups, group_by, manual_groups })
     }).collect::<Result<Vec<_>, String>>()?;
     if views.is_empty() { return Err("This base has no supported table view".into()); }
-    Ok(Base { revision, properties, views })
+    Ok(Base { revision, properties, can_add_view, views })
 }
 
 #[cfg(test)]
@@ -932,5 +996,70 @@ views:
         let parsed = parse(&fs::read(&file).unwrap()).unwrap();
         assert_eq!(parsed["views"][0]["sort"], parse(yaml.as_bytes()).unwrap()["views"][0]["sort"]);
         assert!(set_columns(&root, &index, path, &opened.revision, 0, vec!["file.ext".into()]).is_err());
+    }
+
+    #[test]
+    fn adds_independent_views_and_combines_copied_filters() {
+        let root = std::env::temp_dir().join(format!("opensidian-base-add-view-{}", opensidian_lib::os_random_hex().unwrap()));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let path = "Work.base";
+        let yaml = r#"filters: 'file.inFolder("Work")'
+views:
+  - type: cards
+    name: Gallery
+  - type: table
+    name: Open
+    order: [file.name, priority]
+    sort: [{property: priority, direction: DESC}]
+    filters: 'status == "open"'
+"#;
+        let file = root.join(path);
+        fs::write(&file, yaml).unwrap();
+        let mut index = Index::build(&root);
+        for (name, status, priority) in [("Work/Low", "open", 2), ("Work/High", "open", 7),
+            ("Work/Closed", "done", 8), ("Other/Urgent", "open", 10)] {
+            index.upsert(name, &format!("---\nstatus: {status}\npriority: {priority}\n---\n"));
+        }
+        let opened = open(&root, &index, path).unwrap();
+        assert!(opened.can_add_view);
+        let config = |name: &str, copy_from| NewView { name: name.into(), copy_from, conditions: vec![] };
+        assert!(add_view(&root, &index, path, &opened.revision, config(" gallery ", None)).is_err());
+        assert!(add_view(&root, &index, path, &opened.revision, config("Copy", Some(0))).is_err());
+        assert_eq!(fs::read(&file).unwrap(), yaml.as_bytes());
+        let condition = Condition {
+            property: "priority".into(), operator: Operator::Ge, kind: ValueKind::Number, value: "5".into(),
+        };
+        let added = add_view(&root, &index, path, &opened.revision,
+            NewView { conditions: vec![condition], ..config("Urgent", Some(1)) }).unwrap();
+        assert_eq!(added.views.len(), 2);
+        assert_eq!(added.views[1].id, 2);
+        assert_eq!(added.views[1].title, "Urgent");
+        assert_eq!(added.views[1].columns, opened.views[0].columns);
+        assert_eq!(added.views[1].rows.len(), 1);
+        assert_eq!(serde_json::to_value(&added.views[1].rows[0]).unwrap()["name"], "Work/High");
+        assert_eq!(added.views[0].rows.len(), 2);
+        assert!(add_view(&root, &index, path, &opened.revision, config("All work", None)).is_err());
+        let all = add_view(&root, &index, path, &added.revision, config("All work", None)).unwrap();
+        assert_eq!(all.views[2].rows.len(), 3);
+        assert_eq!(all.views[2].columns, [FILE_NAME]);
+        let parsed = parse(&fs::read(&file).unwrap()).unwrap();
+        let original = parse(yaml.as_bytes()).unwrap();
+        assert_eq!(parsed["views"][0], original["views"][0]);
+        assert_eq!(parsed["views"][1], original["views"][1]);
+        assert_eq!(parsed["filters"], original["filters"]);
+        assert_eq!(open(&root, &index, path).unwrap().views[1].title, "Urgent");
+
+        let mut full = String::from("views:\n");
+        for id in 0..MAX_VIEWS { full.push_str(&format!("  - {{type: table, name: View {id}}}\n")); }
+        fs::write(&file, &full).unwrap();
+        let opened = open(&root, &index, path).unwrap();
+        assert!(!opened.can_add_view);
+        assert!(add_view(&root, &index, path, &opened.revision, config("Extra", None)).is_err());
+        assert_eq!(fs::read(&file).unwrap(), full.as_bytes());
     }
 }
