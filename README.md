@@ -20,7 +20,7 @@ Download one from the [v0.9.2 release](https://github.com/jpzk/opensidian/releas
 
 ### Windows x64
 
-Download the unsigned NSIS installer from a successful run of the [Windows build workflow](https://github.com/Bcobas/opensidian/actions/workflows/windows.yml). The installer uses Microsoft Edge WebView2.
+Download the unsigned NSIS installer and its SHA-256 checksum from the [Windows release page](https://github.com/Bcobas/opensidian/releases). The installer uses Microsoft Edge WebView2.
 
 To open a standalone `.md`, `.markdown`, `.txt`, or `.pdf` file, use **Open file** in the vault picker or **Open document** in the command palette or reader toolbar. You can also use **Open with → Opensidian** in Explorer or pass a quoted file path to `opensidian.exe`. The document opens in its own window without creating a vault.
 
