@@ -1023,10 +1023,28 @@ async function toolOpenBase(path) {
       return Object.hasOwn(row.values, key) ? row.values[key] : "";
     };
     const label = (view, key) => view.labels?.[key] ?? baseFileProperties.find(([property]) => key === property)?.[1] ?? key.slice(5);
-    const exportCsv = toolButton("Export CSV", () => {
+    const tableResults = () => {
       const view = activeView();
-      toolExportBaseCsv(path, view.columns.map(key => label(view, key)),
-        results.map(row => view.columns.map(key => value(row, key))));
+      return {
+        headers: view.columns.map(key => label(view, key)),
+        rows: results.map(row => view.columns.map(key => value(row, key)))
+      };
+    };
+    const exportCsv = toolButton("Export CSV", () => {
+      const { headers, rows } = tableResults();
+      toolExportBaseCsv(path, headers, rows);
+    });
+    const copyTable = toolButton("Copy table", async () => {
+      const snapshot = results;
+      copyTable.disabled = true;
+      try {
+        await inv("copy_vault_base_table", tableResults());
+        if (dialog.open && results === snapshot) status(snapshot.length ? "Table copied" : "Column headers copied");
+      } catch (error) {
+        if (dialog.open) status(errStr(error));
+      } finally {
+        copyTable.disabled = false;
+      }
     });
     const render = () => {
       const view = activeView();
@@ -1102,7 +1120,7 @@ async function toolOpenBase(path) {
       render();
     };
     filter.oninput = render;
-    body.append(filter, choose, addView, editView, edit, editSort, editColumns, editFilters, editBaseFilters, exportCsv, table);
+    body.append(filter, choose, addView, editView, edit, editSort, editColumns, editFilters, editBaseFilters, exportCsv, copyTable, table);
     render();
   } catch (error) { status(errStr(error)); }
 }

@@ -12,7 +12,7 @@ use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
 use crate::{note_views, safe_rel, vaultfs::Vault, Index};
 
 const MAX_BYTES: u64 = 128 * 1024;
-const MAX_CSV_BYTES: usize = 32 * 1024 * 1024;
+const MAX_EXPORT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_COLUMNS: usize = 128;
 const MAX_VIEWS: usize = 16;
 const MAX_CONDITIONS: usize = 16;
@@ -199,37 +199,48 @@ pub enum CsvSeparator {
 }
 
 fn csv_contents(headers: Vec<String>, rows: Vec<Vec<String>>, separator: CsvSeparator) -> Result<String, String> {
-    if headers.is_empty() || headers.len() > MAX_COLUMNS || rows.iter().any(|row| row.len() != headers.len()) {
-        return Err("The CSV rows must match the table columns".into());
-    }
     let separator = match separator {
         CsvSeparator::Comma => ',',
         CsvSeparator::Semicolon => ';',
     };
-    let mut csv = String::from('\u{feff}');
+    spreadsheet_contents(headers, rows, separator)
+}
+
+pub fn clipboard_table(headers: Vec<String>, rows: Vec<Vec<String>>) -> Result<String, String> {
+    spreadsheet_contents(headers, rows, '\t')
+}
+
+fn spreadsheet_contents(headers: Vec<String>, rows: Vec<Vec<String>>, separator: char) -> Result<String, String> {
+    if headers.is_empty() || headers.len() > MAX_COLUMNS || rows.iter().any(|row| row.len() != headers.len()) {
+        return Err("The exported rows must match the table columns".into());
+    }
+    let clipboard = separator == '\t';
+    let mut output = if clipboard { String::new() } else { String::from('\u{feff}') };
     for row in std::iter::once(headers).chain(rows) {
         for (index, value) in row.into_iter().enumerate() {
-            if index != 0 { csv.push(separator); }
-            csv.push('"');
+            if index != 0 { output.push(separator); }
+            let quoted = !clipboard || value.contains(['\t', '\r', '\n', '"']);
+            if quoted { output.push('"'); }
             // Quoting alone does not stop spreadsheet apps from evaluating a cell.
             let trimmed = value.trim_start_matches(|ch: char| ch.is_whitespace() || ch.is_control() || ch == '\u{feff}');
             let starts_formula = trimmed.starts_with(['=', '+', '-', '@', '＝', '＋', '－', '＠']);
             let plain_number = trimmed.starts_with(['+', '-'])
                 && trimmed.parse::<f64>().is_ok_and(f64::is_finite);
             if (starts_formula && !plain_number) || value.starts_with(['\t', '\r', '\n', '\0']) {
-                csv.push('\'');
+                output.push('\'');
             }
             for ch in value.chars() {
-                if ch == '"' { csv.push('"'); }
-                csv.push(ch);
+                if ch == '"' { output.push('"'); }
+                // Windows clipboard text uses NUL as its terminator.
+                output.push(if clipboard && ch == '\0' { '\u{fffd}' } else { ch });
             }
-            csv.push('"');
-            if csv.len() > MAX_CSV_BYTES { return Err("The CSV would exceed 32 MiB".into()); }
+            if quoted { output.push('"'); }
+            if output.len() > MAX_EXPORT_BYTES { return Err("The table would exceed 32 MiB".into()); }
         }
-        csv.push_str("\r\n");
+        output.push_str("\r\n");
     }
-    if csv.len() > MAX_CSV_BYTES { return Err("The CSV would exceed 32 MiB".into()); }
-    Ok(csv)
+    if output.len() > MAX_EXPORT_BYTES { return Err("The table would exceed 32 MiB".into()); }
+    Ok(output)
 }
 
 pub fn export_csv(
@@ -1138,6 +1149,21 @@ views:
         for invalid in ["../../Otro.csv", "C:/Otro.csv", "Proyecto/Otro.csv", "Informe.txt", "NUL.csv"] {
             assert!(export_csv(&root, base, invalid, headers(), rows(), CsvSeparator::Comma).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn copies_tabular_text_with_headers_and_escaped_cells() {
+        let headers = vec!["Nota".into(), "Detalle".into()];
+        let rows = vec![
+            vec!["Café, té".into(), "Dijo \"hola\"\nAdiós".into()],
+            vec!["-3.5".into(), "Uno\tDos".into()],
+            vec!["".into(), "  =1+1".into()],
+            vec!["Aquí\0sigue".into(), "".into()],
+        ];
+        assert_eq!(clipboard_table(headers.clone(), rows).unwrap(),
+            "Nota\tDetalle\r\nCafé, té\t\"Dijo \"\"hola\"\"\nAdiós\"\r\n-3.5\t\"Uno\tDos\"\r\n\t'  =1+1\r\nAquí\u{fffd}sigue\t\r\n");
+        assert_eq!(clipboard_table(headers.clone(), vec![]).unwrap(), "Nota\tDetalle\r\n");
+        assert!(clipboard_table(headers, vec![vec!["Short".into()]]).is_err());
     }
 
     #[test]

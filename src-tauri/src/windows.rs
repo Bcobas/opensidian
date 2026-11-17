@@ -101,9 +101,17 @@ pub fn open_file(owner: HWND, path: &Path) -> Result<(), String> {
 }
 
 pub fn copy_path(owner: HWND, path: &Path) -> ::windows::core::Result<()> {
+    copy_utf16(owner, &wide_path(path))
+}
+
+pub fn copy_text(owner: HWND, text: &str) -> ::windows::core::Result<()> {
+    let units: Vec<_> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    copy_utf16(owner, &units)
+}
+
+fn copy_utf16(owner: HWND, units: &[u16]) -> ::windows::core::Result<()> {
     const CF_UNICODETEXT: u32 = 13;
-    let path = wide_path(path);
-    let bytes = unsafe { std::slice::from_raw_parts(path.as_ptr().cast(), std::mem::size_of_val(path.as_slice())) };
+    let bytes = unsafe { std::slice::from_raw_parts(units.as_ptr().cast(), std::mem::size_of_val(units)) };
     copy_clipboard(owner, CF_UNICODETEXT, bytes)
 }
 

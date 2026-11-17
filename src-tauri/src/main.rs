@@ -1417,6 +1417,20 @@ fn set_vault_base_global_filters(
 
 #[cfg(windows)]
 #[tauri::command]
+async fn copy_vault_base_table(window: tauri::Window, headers: Vec<String>, rows: Vec<Vec<String>>) -> Result<(), String> {
+    let text = bases::clipboard_table(headers, rows)?;
+    let (send, mut receive) = tauri::async_runtime::channel(1);
+    let owner = window.clone();
+    window.run_on_main_thread(move || {
+        let result = owner.hwnd().map_err(|error| error.to_string())
+            .and_then(|hwnd| windows::copy_text(hwnd, &text).map_err(|error| error.to_string()));
+        let _ = send.try_send(result);
+    }).map_err(|error| error.to_string())?;
+    receive.recv().await.ok_or("The clipboard request ended unexpectedly".to_owned())?
+}
+
+#[cfg(windows)]
+#[tauri::command]
 async fn export_vault_base_csv(
     v: State<'_, Vault>, path: String, filename: String, headers: Vec<String>, rows: Vec<Vec<String>>,
     separator: bases::CsvSeparator,
@@ -7385,6 +7399,7 @@ fn main() {
             #[cfg(windows)] set_vault_base_filters,
             #[cfg(windows)] set_vault_base_global_filters,
             #[cfg(windows)] export_vault_base_csv,
+            #[cfg(windows)] copy_vault_base_table,
             #[cfg(windows)] canvas_version_history,
             #[cfg(windows)] read_canvas_revision,
             #[cfg(windows)] restore_canvas_revision,
