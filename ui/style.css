@@ -1851,6 +1851,35 @@ body.floorrelayout #main { padding-right: 1px }
 #wf-close { right: 4px }
 #wframe button:hover { background: var(--bg-surface); color: var(--text-chrome) }
 #wf-close:hover { background: var(--accent-red); color: var(--bg-ribbon) }
+.windows-native-frame :is(#wframe, #wrz) { display: none }
+@media (max-width: 720px) {
+  .windows-native-frame .app-container { position: relative }
+  .windows-native-frame #ribbon { overflow-y: auto; scrollbar-width: none }
+  .windows-native-frame #side:not([hidden]), .windows-native-frame #rside:not([hidden]) {
+    position: absolute;
+    inset-block: 0;
+    z-index: 8;
+    max-width: min(300px, calc(100% - 56px));
+  }
+  .windows-native-frame #side:not([hidden]) {
+    inset-inline-start: 44px;
+    border-inline-end: 1px solid var(--border);
+  }
+  .windows-native-frame #rside:not([hidden]) {
+    inset-inline-end: 0;
+    border-inline-start: 1px solid var(--border);
+  }
+  .windows-native-frame :is(#ldiv, #rdiv) { display: none }
+  .windows-native-frame #pcard { max-height: calc(100% - 24px); overflow: auto }
+}
+@media (max-width: 500px) {
+  .windows-native-frame #sbody { flex-direction: column }
+  .windows-native-frame #snav { width: 100%; flex: 0 0 min(25%, 6rem); border-inline-end: 0; border-bottom: 1px solid var(--border) }
+  .windows-native-frame #spage { min-height: 0; padding: 8px; overflow: auto }
+}
+@media (max-height: 400px) {
+  .standalone-reader .reader-toolbar { max-height: 45vh; overflow: auto }
+}
 /* R33.4 keyboard: every control is a real <button>, so Tab reaches it and
    Enter/Space activates it — the focus ring has to be visible or "operable by
    keyboard" is a claim nobody can see. */

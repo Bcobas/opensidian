@@ -230,11 +230,44 @@ async function linkSync(src, name) { // R13.3: a member opening a note reaches e
 let sidePane = "files";
 /* R9.5/R9.6: sidebar visibility — census [side:lXrX] (r wired in R9.6) */
 let sideOpen = true, rightOpen = false;
+const windowsFileActions = /Windows/.test(navigator.userAgent);
+const compactVault = windowsFileActions && matchMedia("(max-width: 720px)");
+let widePanels = null;
+
+function setSideVisibility(open) {
+  sideOpen = open;
+  $("side").hidden = $("ldiv").hidden = !open;
+  $("collapsebtn").title = open ? "Collapse sidebar" : "Expand sidebar";
+  $("collapsebtn").setAttribute("aria-expanded", String(open));
+}
+
+function setRightVisibility(open) {
+  rightOpen = open;
+  $("rside").hidden = $("rdiv").hidden = !open;
+  $("rtoggle").title = open ? "Collapse right sidebar" : "Expand right sidebar";
+  $("rtoggle").setAttribute("aria-expanded", String(open));
+  placeRToggle();
+  if (open && !(PVHOST && PVHOST.sideShowing("right"))) setRTab(rTab, false);
+}
+
+function adaptVaultPanels() {
+  if (compactVault.matches) {
+    widePanels = [sideOpen, rightOpen];
+    if (sideOpen) setSideVisibility(false);
+    if (rightOpen) setRightVisibility(false);
+  } else if (widePanels) {
+    const [left, right] = widePanels;
+    widePanels = null;
+    if (left !== sideOpen) setSideVisibility(left);
+    if (right !== rightOpen) setRightVisibility(right);
+  }
+  if (state) updateTitle();
+}
+
 function cmdToggleSide() {
   return act("pane_toggle_left", { open: !sideOpen, tabs: groups().reduce((a, g) => a + g.tabs.length, 0) }, () => {
-    sideOpen = !sideOpen;
-    $("side").hidden = $("ldiv").hidden = !sideOpen;
-    $("collapsebtn").title = sideOpen ? "Collapse sidebar" : "Expand sidebar";
+    if (compactVault?.matches && !sideOpen && rightOpen) setRightVisibility(false);
+    setSideVisibility(!sideOpen);
     updateTitle();
   });
 }
@@ -293,7 +326,7 @@ function placeRToggle() {
      The row reserves their width instead of being covered by them: an invisible
      #rtoggle is a control the user has lost. */
   for (const el of document.querySelectorAll(".wfinset")) if (el !== host) el.classList.remove("wfinset");
-  if (host) host.classList.add("wfinset");
+  if (host && !windowsFileActions) host.classList.add("wfinset");
   clearTimeout(rtT);
   rtT = setTimeout(() => {
     rtT = null;
@@ -309,11 +342,8 @@ function placeRToggle() {
 async function cmdToggleRight() {
   if (!state) return;
   await act("pane_toggle_right", { open: !rightOpen, rtab: rTab }, () => {
-    rightOpen = !rightOpen;
-    $("rside").hidden = $("rdiv").hidden = !rightOpen;
-    $("rtoggle").title = rightOpen ? "Collapse right sidebar" : "Expand right sidebar";
-    placeRToggle();
-    if (rightOpen && !(PVHOST && PVHOST.sideShowing("right"))) setRTab(rTab, false);   // pane content fills in AFTER the toggle paints (not awaited); a plugin pane that was showing stays
+    if (compactVault?.matches && !rightOpen && sideOpen) setSideVisibility(false);
+    setRightVisibility(!rightOpen);
     updateTitle();
   });
 }
@@ -2245,7 +2275,6 @@ $("bmebox").addEventListener("keydown", e => {
   setTimeout(updateTitle, 0);                       // a <select> changed by arrow keys publishes its new value
 });
 $("bmebox").addEventListener("mousedown", e => { if (e.target === $("bmebox")) e.preventDefault(); });   // click-off is not Save
-const windowsFileActions = /Windows/.test(navigator.userAgent);
 const appWindow = TAURI.window.getCurrentWindow();
 const secondaryVaultWindow = appWindow.label.startsWith("vault-note-");
 const PLUGIN_WORKSPACE_KEY = "opensidian-plugin-reload-workspace";
@@ -3000,7 +3029,8 @@ function wsNode(node) {
   return o;
 }
 function wsSide(which) {
-  const open = which === "left" ? sideOpen : rightOpen;
+  const [left, right] = widePanels ?? [sideOpen, rightOpen];
+  const open = which === "left" ? left : right;
   const view = which === "left" ? (WS_VIEW_L[sidePane] || "file-explorer") : (WS_VIEW_R[rTab] || "backlink");
   // R28.11: a sidebar leaf carries its OWN view state, not just which pane is
   // showing. Obsidian's search leaf comes back still holding its query, so the
@@ -3378,17 +3408,11 @@ function wsSidesIn(doc) {
     const t = WS_VIEW_R_IN[rs.type];
     if (t && t !== rTab) setRTab(t, false);
   }
-  if (lOpen !== sideOpen) {
-    sideOpen = lOpen;
-    $("side").hidden = $("ldiv").hidden = !sideOpen;
-    $("collapsebtn").title = sideOpen ? "Collapse sidebar" : "Expand sidebar";
-  }
-  if (rOpen !== rightOpen) {
-    rightOpen = rOpen;
-    $("rside").hidden = $("rdiv").hidden = !rightOpen;
-    $("rtoggle").title = rightOpen ? "Collapse right sidebar" : "Expand right sidebar";
-    placeRToggle();
-    if (rightOpen) setRTab(rTab, false);
+  if (widePanels) {
+    widePanels = [lOpen, rOpen];
+  } else {
+    if (lOpen !== sideOpen) setSideVisibility(lOpen);
+    if (rOpen !== rightOpen) setRightVisibility(rOpen);
   }
 }
 /* R28.2 — THE WINDOW RECTANGLE GOES SOMEWHERE ELSE. Not in the vault: a vault
@@ -6312,6 +6336,7 @@ async function openNewTab(name, g = fg()) {   // ggclick: a graph click passes t
   }));
 }
 async function rowOpen(name, ev) {
+  if (compactVault?.matches && sideOpen) setSideVisibility(false);
   if (ev && (ev.button === 1 || ev.ctrlKey || ev.metaKey)) return openNewTab(name);
   const g = fg();
   const t = g.active >= 0 ? g.tabs[g.active] : null;
@@ -13952,7 +13977,16 @@ function wfTok() {
   const k = a && a.id && a.id.indexOf("wf-") === 0 ? a.id : "-";
   return " [wf:" + b + (wfArmed ? "d" : "-") + g + "] [wfm:" + (wfMax ? 1 : 0) + "] [wfk:" + k + "] [wfg:" + wfLast + "] [wfl:" + wfLogA.join(">") + "] [wfp:" + wfProto + "] [wfd:" + wfEv.dn + "," + wfEv.up + "," + wfEv.cx + "," + wfEv.lc + "," + wfEv.mvb + "] [hdr:" + wfHdrTok() + "] [hdra:" + hdrActTok() + "]";
 }
-wfArm();
+if (windowsFileActions) {
+  document.body.classList.add("windows-native-frame");
+  compactVault.addEventListener("change", adaptVaultPanels);
+  adaptVaultPanels();
+  $("main").addEventListener("pointerdown", event => {
+    if (!compactVault.matches || event.target.closest("#rtoggle")) return;
+    if (sideOpen) setSideVisibility(false);
+    if (rightOpen) setRightVisibility(false);
+  });
+} else wfArm();
 
 /* ================= R26: FIND INSIDE A NOTE (Ctrl+F) =================
    Obsidian's in-note find bar, cloned. What the requirement rows buy, and where
