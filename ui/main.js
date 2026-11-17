@@ -2246,6 +2246,8 @@ $("bmebox").addEventListener("keydown", e => {
 });
 $("bmebox").addEventListener("mousedown", e => { if (e.target === $("bmebox")) e.preventDefault(); });   // click-off is not Save
 const windowsFileActions = /Windows/.test(navigator.userAgent);
+const appWindow = TAURI.window.getCurrentWindow();
+const secondaryVaultWindow = appWindow.label.startsWith("vault-note-");
 
 function fileActionItem(item, label, path, action, note) {
   if (!windowsFileActions) {
@@ -2413,9 +2415,9 @@ async function createNote(name, content, onError = saveFailed) {
   return "ok";
 }
 
-async function writeNote(name, content) {   // every save funnels here so graphs live-update
+async function writeNote(name, content, expected) {   // every save funnels here so graphs live-update
   const t0 = perf.now();
-  await inv("write_note", { name, content });   // F1: REJECTS if the bytes did not land
+  await inv("write_note", { name, content, expected });   // F1: REJECTS if the bytes did not land
   await afterWrite(name);
   perf.mark("save", t0, { bytes: content.length });
 }
@@ -2433,6 +2435,13 @@ async function afterWrite(name) {           // bookkeeping shared by write + cre
      + ~75 ms layout, landing in the next keystroke's frame). Any other tab,
      any other note, a NEW note: refresh as before. */
   if (rightOpen && (fresh || rTab !== "bl" || name !== rpNote || rpNote === "-")) rSchedule();   // rsidebar: list panes refresh (200ms)
+  notifyPeerVault({ modified: [name] });
+}
+
+function notifyPeerVault(change) {
+  if (!windowsFileActions) return;
+  const payload = { added: [], removed: [], renamed: [], modified: [], ...change };
+  void inv("notify_note_windows", { change: payload }).catch(console.error);
 }
 
 /* F1 (dataloss-audit): a save that did not land must be VISIBLE and must not
@@ -2483,8 +2492,8 @@ function saveCleared() {
 // title is an async IPC behind the save, so a bare [buf:] can predate it).
 let svqN = 0, svqB = 0;
 function svqTok() { return " [svq:" + svqN + "," + svqB + "]"; }
-async function saveNote(name, content) {    // true == the bytes are on disk
-  try { await writeNote(name, content); }
+async function saveNote(name, content, expected) {    // true == the bytes are on disk
+  try { await writeNote(name, content, expected); }
   catch (e) { saveFailed(name, e); return false; }
   svqN++; svqB = new TextEncoder().encode(content).length;
   requestAnimationFrame(updateTitle);         // publish [svq:] (one coalesced title per frame)
@@ -3060,7 +3069,7 @@ function wsDoc() {
    one stringify and no IPC. */
 const WS_MS = 400;
 function wsTouch() {
-  if (!state || !vaultPath || wsT) return;
+  if (secondaryVaultWindow || !state || !vaultPath || wsT) return;
   wsT = setTimeout(() => wsFlush(), WS_MS);
 }
 /* W6 — OFF THE note_open PATH. The throttle timer can fall due in the middle of
@@ -4566,7 +4575,26 @@ for (const ev of ["mousedown", "click"])
     inv("open_external", { url: a.getAttribute("href") }).catch(err => console.warn("open_external:", err));
   }, true);
 
-const DIS_WIN = "Missing subsystem: a second OS window — single-window tauri app, and no backend command creates one";
+const DIS_WIN = "Available for Markdown note tabs on Windows";
+
+async function openNoteWindow(g, tab, move) {
+  document.body.inert = true;
+  const name = tab.name;
+  try {
+    await Promise.all(savesInFlight);
+    await toolFlush(name);
+    if (!g.tabs.includes(tab) || tab.name !== name) throw new Error("The tab changed. Try again.");
+    await inv("open_note_window", { name, mode: tab.mode, pinned: !!tab.pinned });
+    const index = g.tabs.indexOf(tab);
+    if (move && index >= 0 && tab.name === name && (index !== g.active || !bufDirty(g))) {
+      await closeTab(g, index, "user-close", "moveNoteWindow", true);
+    }
+  } catch (error) {
+    say("Could not open a new note window. " + errStr(error));
+  } finally {
+    document.body.inert = false;
+  }
+}
 /* ---------- R38: THE TAB CONTEXT MENU — Obsidian 1.13.7's list, measured ----------
    THE SPEC is docs/requirements.md §36 (R38) + docs/recon-tabmenu/README.md's
    WIRED / NOT WIRED split: 28 rows in 9 groups on an ACTIVE NOTE tab, 11 on a
@@ -4708,6 +4736,9 @@ function tabMenu(e, g, i, hdr) {
     return d;
   };
   const sep = () => { const d = document.createElement("div"); d.className = "sep"; m.appendChild(d); };
+  const windowItem = (move) => item(move ? "Move to new window" : "Open in new window",
+      windowsFileActions ? () => { closeMenu(); void openNoteWindow(g, tab, move); } : null,
+      windowsFileActions ? null : DIS_WIN);
   const inPlace = fill => {              // the ctxmenu's ONE submenu seam: rebuild in place (R13.1's pick list)
     m.innerHTML = "";
     fill();
@@ -4774,7 +4805,11 @@ function tabMenu(e, g, i, hdr) {
      and NOTHING else (M5/M8, 4 rows not 28). Measured twice, and it is why
      every row below may assume the target IS this group's active tab — which is
      what lets Reading view / Find... / Rename... keep taking the group. */
-  if (i !== g.active) { placeMenu(m, e.clientX, e.clientY); return; }
+  if (i !== g.active) {
+    if (windowsFileActions && !tab.kind) { sep(); windowItem(true); windowItem(false); }
+    placeMenu(m, e.clientX, e.clientY);
+    return;
+  }
   sep();
   }                                      // !hdr: the close group is a TAB verb — Obsidian's ⋮ has none
   const pinRow = () => item(tab.pinned ? "Unpin" : "Pin", () => { closeMenu(); togglePin(g, tab); });   // WIRED (R38.7)
@@ -4819,10 +4854,10 @@ function tabMenu(e, g, i, hdr) {
   item("Source mode",  () => { closeMenu(); setMode(g, "source"); },  null, tab.mode === "source");      // WIRED: setMode — the ✓ is the R12.4 radio, now a marker element
   // ---- group 3 (4 rows) ----
   sep();
-  if (!hdr) item("Move to new window", null, DIS_WIN);
+  if (!hdr) windowItem(true);
   item("Split right", () => { closeMenu(); splitGroup(g, "row", i); });         // WIRED: R6.2 — row 11 now, not row 1 (R38.12)
   item("Split down",  () => { closeMenu(); splitGroup(g, "col", i); });         // WIRED: R6.2 (R38.13)
-  item("Open in new window", null, DIS_WIN + " — and this row COPIES the tab where the one above MOVES it (measured), so the two stay distinct");
+  windowItem(false);
   // ---- group 4 (6 rows) ----
   sep();
   item("Rename...", () => { closeMenu(); focusGroup(g); cmdRename(); });        // WIRED: R24.2/R34 rename + the prompted link update
@@ -5998,6 +6033,7 @@ async function delAnswer(kind) {
    the user's answer was "delete", and honouring a 400 ms-old keystroke over it
    is the same data-loss shape in reverse. */
 async function afterDelete(nm) {
+  notifyPeerVault({ removed: [nm] });
   for (const g of groups()) {
     for (let i = g.tabs.length - 1; i >= 0; i--) {
       const t = g.tabs[i];
@@ -6136,9 +6172,15 @@ async function loadActive(g) {
   if (n) mruTouch(n);                // m5: quick-switcher MRU order
   const m = t ? t.mode : "livepreview";
   if (!t || !v.loaded || t.stale || v.name !== n) {   // v.name: navigate() renames the tab in place
-    Ed.setText(g, n ? await inv("read_note", { name: n }) : "", true);   // R17: load the MODEL (fresh parse, one LP build)
+    const disk = n ? await inv("read_note", { name: n }) : "";
+    Ed.setText(g, disk, true);   // R17: load the MODEL (fresh parse, one LP build)
     v.name = n;
-    if (t) { t.base = g.editor.value; t.stale = false; v.loaded = true; }  // R11: disk base
+    if (t) {
+      if (windowsFileActions) t.diskBase = disk;
+      t.base = windowsFileActions ? bufOf(g) : g.editor.value;
+      t.stale = false;
+      v.loaded = true;
+    }
     if (m === "reading") await preview(g);
     else if (isLp(m)) {
       await lpRender(g, -1, 0, true);
@@ -6264,8 +6306,9 @@ async function rowOpen(name, ev) {
 async function navigate(g, name, anchor) { // wikilink / graph click: replace g's ACTIVE tab, push history
   if (PVHOST && PVHOST.openAs && await PVHOST.openAs(g, name, "replace")) return;   // top5-func: PV.openAs (the plugin view replaces the active note tab)
   navInfo = ""; nvRv = "";
-  await act("note_open", { via: "link", tabs: g.tabs.length }, twOpen(async sp => {
+  const opened = await act("note_open", { via: "link", tabs: g.tabs.length }, twOpen(async sp => {
     await flushSave(g);
+    if (windowsFileActions && bufDirty(g)) return false;
     if (g.active < 0) { g.tabs.push(mkTab(name)); g.active = 0; }
     else {
       const tab = g.tabs[g.active];
@@ -6274,7 +6317,9 @@ async function navigate(g, name, anchor) { // wikilink / graph click: replace g'
     }
     await loadActive(g);
     Object.assign(sp.attrs, { mode: g.tabs[g.active].mode, bytes: g.editor.value.length, lines: g.lpLines || 0 });
+    return true;
   }));
+  if (opened === false) return;
   await linkSync(g.tabs[g.active], name);   // R13.3: linked members follow
   if (anchor) await navAnchor(g, anchor);
 }
@@ -8721,6 +8766,11 @@ function folderPathChange(from, to, includeFolder = false) {
 async function applyFolderChange(from, to, views) {
   const remap = folderPathChange(from, to);
   const moving = to !== null;
+  if (windowsFileActions) {
+    const previous = notesCache.filter(name => name.startsWith(from + "/"));
+    if (moving) notifyPeerVault({ renamed: previous.map(name => [name, remap(name)]) });
+    else notifyPeerVault({ removed: previous });
+  }
   if (moving && PLGNM) {
     for (const name of notesCache) {
       const next = remap(name);
@@ -10194,6 +10244,7 @@ function cmdPalette() {
    consented link rewrite are renameThenAsk's (R24.3), the same tail the inline
    title uses, then tabs/hist/mru follow the name */
 async function applyRename(old, nn) {   // post-rename bookkeeping (F2 / cmdRename, the R34 title rename, and R24.6's drag-move)
+  notifyPeerVault({ renamed: [[old, nn]] });
   if (PLGNM) try { PLGNM(old, nn); } catch (e) { console.error("[plugin] noteMoved:", e); }   // cv-journeys: before the tree refresh repaints a board
   for (const h of groups()) for (const tb of h.tabs) {
     if (tb.kind) continue;
@@ -12291,7 +12342,7 @@ async function switchReveal() {
     await inv("switch_ready");
   } catch (e) { /* the backend fallback reveals it anyway */ }
 }
-async function enterVault() {
+async function enterVault(noteSeed = null) {
   // vaultbleed: entered ONCE per process — there is no previous vault to tear
   // down (the session-replace path died with the in-process switch).
   if (state) throw new Error("enterVault: this process already has a vault");
@@ -12302,7 +12353,7 @@ async function enterVault() {
   // R28.7: read the layout BEFORE the first render. renderLayout -> updateTitle
   // -> wsTouch arms a 400ms write, so reading later would race a write of the
   // empty boot layout over the file we came here to restore.
-  const wdoc = await wsRead();
+  const wdoc = secondaryVaultWindow ? null : await wsRead();
   const g = mkGroup();               // M6: one group, wrapped in a one-leaf split tree
   state = { root: { dir: "row", children: [g], fractions: [1] }, focused: null };
   renderLayout();
@@ -12317,7 +12368,15 @@ async function enterVault() {
   // R28.7 / R28.13: the restore, or — if there is no file, it is corrupt, or
   // nothing in it survived the degrade rule — the ordinary first-launch path.
   // Both land on a usable window; that is the whole point of R28.13.
-  if (!await wsApply(wdoc, names)) {
+  if (noteSeed) {
+    if (!names.includes(noteSeed.name)) throw new Error("The note is no longer in the vault.");
+    const tab = mkTab(noteSeed.name);
+    tab.mode = noteSeed.mode;
+    tab.pinned = noteSeed.pinned;
+    g.tabs.push(tab);
+    g.active = 0;
+    await loadActive(g);
+  } else if (!await wsApply(wdoc, names)) {
     if (names.length) await openInTab(packageInfo && names.includes(packageInfo[0]) ? packageInfo[0] : names[0], "boot");
     else renderTabs(g);
   }
@@ -12328,7 +12387,8 @@ async function enterVault() {
   }
   perf.mark("boot", 0, { notes: names.length });   // perf: page start -> vault ready (first note rendered)
   Ed.fontWarm(fg());   // perfslow: the live preview's faces are built in idle time after boot, not inside the first note open that shows them
-  switchReveal();   // item 14: a switch-started window shows itself only now, at the old window's rect
+  if (noteSeed) await inv("note_window_ready");
+  else switchReveal();   // item 14: a switch-started window shows itself only now, at the old window's rect
   // plugin-loader: enabled community plugins load once the vault is on screen (after the boot
   // mark), unawaited. Restricted mode (the default) = one plugins_state call, no plugin code.
   if (window.__osPluginHost && __osPluginHost.boot) __osPluginHost.boot(vaultPath);
@@ -12384,6 +12444,7 @@ async function saveBuf1(g) {
   const n = curOf(g);
   if (!n) return false;
   const t = g.active >= 0 ? g.tabs[g.active] : null;
+  if (windowsFileActions && t && !t.kind) return saveWindowNote(g, t, n);
   let buf = bufOf(g);
   if (t && !t.kind && t.base != null) {
     const disk = await inv("read_note", { name: n });
@@ -12404,6 +12465,84 @@ async function saveBuf1(g) {
   setBase(t, buf);
   return true;
 }
+
+function noteSaveConflict(g, tab) {
+  tab.saveConflict = true;
+  saveFailed(tab.name, "The note changed in another window or on disk. Your draft is still here.");
+  const review = toolButton("Review conflict", async () => {
+    if (!g.tabs.includes(tab)) return;
+    if (g.tabs[g.active] !== tab) await switchTab(g, g.tabs.indexOf(tab));
+    if (g.tabs[g.active] !== tab || !bufDirty(g)) return;
+    const name = tab.name;
+    const { dialog, body, status } = toolDialog("Review save conflict · " + name);
+    const columns = toolNode("div");
+    columns.className = "note-tool-compare";
+    const addVersion = (title, text) => {
+      const label = toolNode("label", title);
+      const field = toolNode("textarea");
+      field.readOnly = true;
+      field.value = text;
+      label.append(field);
+      columns.append(label);
+    };
+    try {
+      const disk = await inv("read_note", { name });
+      if (g.tabs[g.active] !== tab || tab.name !== name) { dialog.close(); return; }
+      addVersion("Your draft", bufOf(g));
+      addVersion("Saved version", disk);
+      const reload = toolButton("Use saved version", async () => {
+        try {
+          const latest = await inv("read_note", { name });
+          if (g.tabs[g.active] !== tab || tab.name !== name) return;
+          if (latest !== disk) {
+            status("The saved version changed again. Reopen the comparison.");
+            return;
+          }
+          await reloadInPlace(g, latest);
+          tab.saveConflict = false;
+          saveCleared();
+          dialog.close();
+        } catch (error) { status(errStr(error)); }
+      });
+      body.append(toolNode("p", "Copy any text you want to keep before using the saved version."), columns, reload);
+    } catch (error) { status(errStr(error)); }
+  });
+  $("saveerr").append(document.createTextNode(" "), review);
+}
+
+async function saveWindowNote(g, tab, name) {
+  if (!bufDirty(g)) return false;
+  const disk = await inv("read_note", { name });
+  if (g.tabs[g.active] !== tab || tab.name !== name || !bufDirty(g)) return false;
+  let text = bufOf(g);
+  const displayDisk = disk.replace(/\r\n?/g, "\n");
+  if (text === disk || text === displayDisk) {
+    tab.base = text;
+    tab.diskBase = disk;
+    if (tab.saveConflict) saveCleared();
+    tab.saveConflict = false;
+    return false;
+  }
+  if (disk !== tab.diskBase) {
+    if (!tab.diskBase || !disk.startsWith(tab.diskBase)) {
+      noteSaveConflict(g, tab);
+      return false;
+    }
+    text += disk.slice(tab.diskBase.length).replace(/\r\n?/g, "\n");
+    await reloadInPlace(g, text, disk);
+  }
+  const crlf = disk.includes("\r\n") && !disk.replaceAll("\r\n", "").includes("\n");
+  const output = crlf ? text.replace(/\r?\n/g, "\r\n") : text;
+  if (!await saveNote(name, output, disk)) {
+    if (g.tabs[g.active] === tab && tab.name === name
+        && await inv("read_note", { name }) !== disk) noteSaveConflict(g, tab);
+    return false;
+  }
+  tab.base = text;
+  tab.diskBase = output;
+  tab.saveConflict = false;
+  return true;
+}
 // R11.2: replace the ACTIVE tab's text in place — caret line/col + scroll kept
 // `base` = the disk bytes the tab holds once the new text is in (default: the
 // text itself = clean). Set in the SAME synchronous step as the text, BEFORE the
@@ -12415,7 +12554,9 @@ async function saveBuf1(g) {
 async function reloadInPlace(g, text, base = text) {
   const t = g.tabs[g.active];
   const c = g.lpActive ? Ed.caret(g) : null;   // R17: caret survives the reload
-  Ed.setText(g, text); t.base = base;
+  Ed.setText(g, text);
+  if (windowsFileActions) t.diskBase = base;
+  t.base = windowsFileActions ? (text === base ? bufOf(g) : base.replace(/\r\n?/g, "\n")) : base;
   if (t.mode === "reading") await preview(g);
   else await lpRender(g, c ? c.l : -1, c ? c.c : 0);   // dirty rows only
   updateStatus(g);
@@ -12468,10 +12609,14 @@ async function onVaultChanged(c) {
       if (!t.kind && gone.has(t.name))
         await dropTab(g, i, renamedFrom.has(t.name) ? "external-rename" : "external-delete", "onVaultChanged#" + vcCount);
     }
-    for (const x of g.tabs) if (!x.kind && x !== g.tabs[g.active] && mod.has(x.name)) x.stale = true;  // R20: retained views re-read on switch
+    for (const x of g.tabs) if (!x.kind && x !== g.tabs[g.active] && mod.has(x.name) && !x.saveConflict) x.stale = true;
     const t = g.active >= 0 ? g.tabs[g.active] : null;
     if (!t || t.kind || !mod.has(t.name)) continue;
     const ext = await inv("read_note", { name: t.name });
+    if (windowsFileActions) {
+      if (g.tabs[g.active] === t && !bufDirty(g) && t.diskBase !== ext) await reloadInPlace(g, ext);
+      continue;
+    }
     const buf = bufOf(g);
     if (buf === ext) { t.base = ext; continue; }
     if (buf === t.base) { await reloadInPlace(g, ext); continue; }   // clean: take disk
@@ -12488,10 +12633,15 @@ async function onVaultChanged(c) {
   updateTitle();
 }
 TAURI.event.listen("vault-changed", e => onVaultChanged(e.payload));
+if (windowsFileActions) {
+  appWindow.listen("vault-peer-change", e => {
+    if (state) void onVaultChanged(e.payload).catch(console.error);
+  });
+}
 TAURI.event.listen("vault-css-changed", e => onVaultCssChanged(e.payload));  // themefs item 6: hot reload
 // R31.1: a real OS drop arrives here, from Rust, never from a DOM drop event.
 // osdrop: the payload is [paths, x, y] (main.rs R31.1), x/y physical px in the webview
-TAURI.event.listen("drop-files", e => {
+appWindow.listen("drop-files", e => {
   const [paths = [], x, y] = e.payload || [];
   if (paths.length === 1 && /\.opensidian\.zip$/i.test(paths[0])) {
     inv("open_package", { path: paths[0] }).catch(toolPackageError);
@@ -12518,7 +12668,30 @@ async function quitFlush(why) {
   console.log(`[quit] ${why}: flushed, dirty=${lost.length}`);
   inv("quit_ready", { dirty: lost.length }).catch(() => {});
 }
-TAURI.event.listen("app-quit", e => quitFlush(e.payload || "quit")).then(() => inv("quit_arm")).catch(() => {});
+async function closeVaultWindow() {
+  if (quitting) return;
+  quitting = true;
+  document.body.inert = true;
+  try {
+    await Promise.all(savesInFlight);
+    const unsaved = await leaveVault();
+    if (unsaved.length) {
+      say("The window is still open because some changes could not be saved.");
+      return;
+    }
+    await inv("close_window_ready");
+  } catch (error) {
+    say(errStr(error));
+  } finally {
+    quitting = false;
+    document.body.inert = false;
+  }
+}
+if (windowsFileActions) {
+  appWindow.listen("vault-window-close", closeVaultWindow).then(() => inv("arm_window_close")).catch(console.error);
+} else {
+  TAURI.event.listen("app-quit", e => quitFlush(e.payload || "quit")).then(() => inv("quit_arm")).catch(() => {});
+}
 /* plug-val G1: window.close() closes the app window as in stock (obsidian-git "commit-and-sync and
    close" calls it). The webview's own close only blanks the page and leaves the window up, and the
    page has no window-close permission (capabilities: core:default), so this takes the close
@@ -12565,7 +12738,8 @@ function sgearTok() {
   packageInfo = await inv("package_session").catch(() => null);
   $("p-open-package").onclick = toolOpenPackage;
   vaultPath = await inv("vault_get");
-  if (vaultPath) await enterVault(); else showPicker();
+  const noteSeed = secondaryVaultWindow ? await inv("note_window_seed") : null;
+  if (vaultPath) await enterVault(noteSeed); else showPicker();
   if (bootNote) { if (vaultPath) say(bootNote, "vaultarg"); else {
     // the BOOT picker's window stays untitled by the census (no 'panes:', see
     // loadRecent) — so the reason is published as "opensidian [vault:-]

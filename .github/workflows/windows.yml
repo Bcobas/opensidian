@@ -85,6 +85,9 @@ jobs:
       - name: Test saved base tables
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian bases::tests
+      - name: Test concurrent note window saves
+        working-directory: src-tauri
+        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_windows::tests
       - name: Test OCR on a scanned PDF
         working-directory: src-tauri
         shell: pwsh

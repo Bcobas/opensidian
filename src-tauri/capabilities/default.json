@@ -1,1 +1,1 @@
-{ "identifier": "default", "windows": ["main"], "permissions": ["core:default", "core:window:allow-set-title"] }
+{ "identifier": "default", "windows": ["main", "vault-note-*"], "permissions": ["core:default", "core:window:allow-set-title"] }

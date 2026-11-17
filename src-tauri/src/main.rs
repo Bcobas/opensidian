@@ -82,6 +82,8 @@ mod file_actions;
 mod folder_actions;
 #[cfg(windows)]
 mod note_merge;
+#[cfg(windows)]
+mod note_windows;
 
 #[cfg(windows)]
 mod sandbox {
@@ -1220,9 +1222,34 @@ fn read_note(v: State<Vault>, name: String, otel: Option<perf::Ctx>) -> String {
 // F1 (dataloss-audit): the Result is the product. A save that did not land
 // MUST reach the UI — a swallowed ENOSPC/EROFS costs every edit of a session.
 #[tauri::command]
-fn write_note(v: State<Vault>, name: String, content: String, otel: Option<perf::Ctx>) -> Result<(), String> {
+fn write_note(v: State<Vault>, name: String, content: String, expected: Option<String>, otel: Option<perf::Ctx>) -> Result<(), String> {
     let bytes = content.len();
+    #[cfg(windows)]
+    if let Some(expected) = expected {
+        let root = cur_vault(&v).ok_or("no vault open")?;
+        let mut index = v.index.lock().map_err(|error| error.to_string())?;
+        return span_timed!(otel => "write_note", write_note_if_current(&root, &mut index, &name, &content, &expected), serde_json::json!({"bytes": bytes}));
+    }
+    #[cfg(not(windows))]
+    let _ = expected;
     span_timed!(otel => "write_note", write_note_inner(&v, &name, &content), serde_json::json!({"bytes": bytes}))
+}
+
+#[cfg(windows)]
+fn write_note_if_current(root: &Path, index: &mut Index, name: &str, content: &str, expected: &str) -> Result<(), String> {
+    if content.len() as u64 > index::MAX_NOTE_BYTES { return Err("The note would exceed the 32 MiB limit".into()); }
+    let path = note_rel(name).ok_or("invalid name")?;
+    let fs = vaultfs::Vault::open(root).map_err(|error| error.to_string())?;
+    let current = fs.p_read(&path, index::MAX_NOTE_BYTES).map_err(|error| error.to_string())?;
+    const CONFLICT: &str = "The note changed on disk";
+    if current != expected.as_bytes() { return Err(CONFLICT.into()); }
+    checkpoint_note(&fs, &path, content);
+    if !fs.replace_if_unchanged(&path, &current, content.as_bytes()).map_err(|error| error.to_string())? {
+        return Err(CONFLICT.into());
+    }
+    let name = opensidian_lib::vault_path_string(&path.with_extension(""));
+    index.upsert(&name, content);
+    Ok(())
 }
 
 fn write_note_inner(v: &Vault, name: &str, content: &str) -> Result<(), String> {
@@ -2451,9 +2478,11 @@ fn templates_format(root: &Path, key: &str) -> Option<String> {
 #[tauri::command(async)]
 fn write_workspace(
     v: State<Vault>,
+    win: tauri::Window,
     vault: String,
     layout: serde_json::Value,
 ) -> Result<(), String> {
+    if win.label() != "main" { return Ok(()); }
     // THE WRITE IS VAULT-SCOPED, and that argument is the whole point of it.
     // A layout write is ARMED by a mutation in one vault and EXECUTED up to
     // WS_MS later, plus an IPC hop; (pre-vaultbleed) `set_vault` could land in that window. If
@@ -2607,6 +2636,13 @@ fn create_vault_dir(parent: String, name: String) -> Result<String, String> {
    this window keeps painting on. */
 #[tauri::command]
 async fn open_vault_window(app: tauri::AppHandle, win: tauri::Window, v: State<'_, Vault>, path: String, replace: bool) -> Result<u32, String> {
+    #[cfg(windows)]
+    if replace {
+        use tauri::Manager;
+        if app.webview_windows().len() > 1 {
+            return Err("Close the other windows of this vault before switching, or open the vault in a new window.".into());
+        }
+    }
     let p = PathBuf::from(path.trim());
     vault_rules(&p)?;
     if let Some(cur) = cur_vault(&v) {
@@ -7291,7 +7327,10 @@ fn main() {
         wc.create = false;
         wc.clone()
     });
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let builder = builder.manage(note_windows::NoteWindows::default());
+    builder
         .plugin(appid::plugin())
         .manage(vault)
         .manage(PackageState(package))
@@ -7372,10 +7411,16 @@ fn main() {
         // `tauri://drag-drop` payload has. Such a file is never attached, never
         // half-attached; R31.10.
         .on_window_event(|w, e| {
-            winsize_event(w, e); // goal winsize: track + save on close (not the drop)
+            if w.label() == "main" { winsize_event(w, e); }
+            #[cfg(not(windows))]
             quit_event(w, e); // tab-dataloss: a close waits (bounded) for the UI flush
+            #[cfg(windows)]
+            note_windows::on_event(w, e);
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) = e {
                 use tauri::Emitter;
+                #[cfg(windows)]
+                let _ = w.emit_to(tauri::EventTarget::labeled(w.label()), DROP_EVENT, (paths, position.x, position.y));
+                #[cfg(not(windows))]
                 let _ = w.emit(DROP_EVENT, (paths, position.x, position.y));
             }
         })
@@ -7464,6 +7509,12 @@ fn main() {
             #[cfg(windows)] add_note_property,
             #[cfg(windows)] note_property_fields,
             #[cfg(windows)] set_note_property,
+            #[cfg(windows)] note_windows::open_note_window,
+            #[cfg(windows)] note_windows::note_window_seed,
+            #[cfg(windows)] note_windows::note_window_ready,
+            #[cfg(windows)] note_windows::arm_window_close,
+            #[cfg(windows)] note_windows::close_window_ready,
+            #[cfg(windows)] note_windows::notify_note_windows,
             #[cfg(windows)] vault_base_paths,
             #[cfg(windows)] trash_vault_base,
             #[cfg(windows)] create_vault_base,

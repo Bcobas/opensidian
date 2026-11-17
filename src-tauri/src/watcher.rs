@@ -36,6 +36,7 @@ pub struct Diff {
 }
 
 #[derive(Debug, Default, PartialEq, Clone, Serialize)]
+#[cfg_attr(windows, derive(serde::Deserialize))]
 pub struct Change {
     pub added: Vec<String>,
     pub removed: Vec<String>,
