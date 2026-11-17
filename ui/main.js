@@ -6870,6 +6870,7 @@ function attachmentFileMenu(e, path) {
   fileActionItem(item, "Copy path", path, "copy_path");
   fileActionItem(item, "Open in default app", path, "open_default");
   fileActionItem(item, "Show in system explorer", path, "reveal");
+  if (/\.base$/i.test(path)) item("Move to trash", () => toolTrashBase(path));
   placeMenu(menu, e.clientX, e.clientY);
 }
 

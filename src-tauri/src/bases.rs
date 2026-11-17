@@ -295,6 +295,16 @@ pub fn list(root: &Path) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
+pub fn trash(root: &Path, path: &str) -> Result<String, String> {
+    let path = base_path(path)?;
+    let stem = path.file_stem().and_then(|name| name.to_str()).ok_or("Invalid base name")?;
+    let extension = path.extension().and_then(|ext| ext.to_str()).ok_or("Invalid base type")?;
+    let vault = Vault::open(root).map_err(|error| error.to_string())?;
+    let destination = vault.trash(&path, Path::new(crate::TRASH_DIR), stem, extension)
+        .map_err(|error| format!("Could not move the base to the vault trash: {error}"))?;
+    Ok(opensidian_lib::vault_path_string(&destination))
+}
+
 pub fn create(root: &Path, path: &str, config: NewBase) -> Result<(), String> {
     let path = base_path(path)?;
     if config.columns.is_empty() || config.columns.len() > MAX_COLUMNS || !config.columns.iter().all(|key| column(key))
@@ -956,6 +966,32 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn trashes_base_files_without_touching_notes_or_replacing_an_earlier_copy() {
+        let root = std::env::temp_dir().join(format!("opensidian-base-trash-{}", opensidian_lib::os_random_hex().unwrap()));
+        fs::create_dir_all(root.join("Project")).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        }
+        let _cleanup = Cleanup(root.clone());
+        fs::write(root.join("Project/Work.BASE"), b"invalid YAML [").unwrap();
+        fs::write(root.join("Project/Work.md"), b"original note").unwrap();
+        let first = trash(&root, "Project/Work.BASE").unwrap();
+        assert_eq!(first, ".trash/Work.BASE");
+        assert_eq!(fs::read(root.join(&first)).unwrap(), b"invalid YAML [");
+        assert!(list(&root).unwrap().is_empty());
+        fs::write(root.join("Project/Work.BASE"), b"another version").unwrap();
+        let second = trash(&root, "Project/Work.BASE").unwrap();
+        assert_eq!(second, ".trash/Work.1.BASE");
+        assert_eq!(fs::read(root.join(second)).unwrap(), b"another version");
+        assert_eq!(fs::read(root.join(first)).unwrap(), b"invalid YAML [");
+        for path in ["Project/Work.BASE", "Project/Work.md", "../Work.base", ".trash/Work.BASE"] {
+            assert!(trash(&root, path).is_err(), "{path}");
+        }
+        assert_eq!(fs::read(root.join("Project/Work.md")).unwrap(), b"original note");
+    }
 
     #[test]
     fn creates_lists_and_opens_saved_note_tables() {

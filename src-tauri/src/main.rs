@@ -1337,6 +1337,12 @@ fn vault_base_paths(v: State<Vault>) -> Result<Vec<String>, String> {
 
 #[cfg(windows)]
 #[tauri::command]
+fn trash_vault_base(v: State<Vault>, path: String) -> Result<String, String> {
+    bases::trash(&cur_vault(&v).ok_or("No vault open")?, &path)
+}
+
+#[cfg(windows)]
+#[tauri::command]
 fn create_vault_base(v: State<Vault>, path: String, config: bases::NewBase) -> Result<(), String> {
     bases::create(&cur_vault(&v).ok_or("No vault open")?, &path, config)
 }
@@ -7389,6 +7395,7 @@ fn main() {
             note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
             #[cfg(windows)] add_note_property,
             #[cfg(windows)] vault_base_paths,
+            #[cfg(windows)] trash_vault_base,
             #[cfg(windows)] create_vault_base,
             #[cfg(windows)] open_vault_base,
             #[cfg(windows)] add_vault_base_view,

@@ -352,6 +352,31 @@ async function toolNoteTable() {
 
 const baseFileProperties = [["file.name", "Note"], ["file.path", "Path"], ["file.folder", "Folder"], ["file.ext", "Extension"]];
 
+function toolTrashBase(path, onTrashed = say) {
+  const { dialog, body, status } = toolDialog("Move base to trash");
+  const cancel = dialog.querySelector("header button");
+  cancel.textContent = "Cancel";
+  const move = toolButton("Move to trash", async () => {
+    if (move.disabled) return;
+    cancel.disabled = move.disabled = true;
+    status("");
+    let destination;
+    try { destination = await inv("trash_vault_base", { path }); }
+    catch (error) {
+      status(errStr(error));
+      cancel.disabled = move.disabled = false;
+      return;
+    }
+    dialog.close();
+    onTrashed("Moved to " + destination);
+    try { await refreshTree(); }
+    catch (error) { say(errStr(error)); }
+  });
+  body.append(toolNode("p", path + " will be moved to .trash in this vault."), move);
+  dialog.addEventListener("cancel", event => { if (move.disabled) event.preventDefault(); });
+  cancel.focus();
+}
+
 async function toolBases() {
   const { dialog, body, status } = toolDialog("Bases");
   const create = toolButton("Create a base", () => {
@@ -367,19 +392,30 @@ async function toolBases() {
     const filter = toolFilter("Search saved bases");
     const list = toolNode("ul");
     list.className = "note-tool-list";
-    const entries = paths.map(path => {
+    let entries = paths.map(path => {
       const row = toolNode("li");
       row.append(toolButton(path, () => {
         dialog.close();
         void toolOpenBase(path);
       }));
+      const trash = toolButton("Move to trash", () => {
+        toolTrashBase(path, message => {
+          entries = entries.filter(entry => entry.row !== row);
+          filter.oninput();
+          status(message);
+          (entries.length ? filter : create).focus();
+        });
+      });
+      trash.setAttribute("aria-label", "Move " + path + " to trash");
+      row.append(trash);
       return { row, key: path.toLocaleLowerCase() };
     });
     filter.oninput = () => {
       const query = filter.value.trim().toLocaleLowerCase();
       const matches = entries.filter(entry => entry.key.includes(query));
       list.replaceChildren(...matches.map(entry => entry.row));
-      status(matches.length ? "" : "No saved bases match.");
+      filter.hidden = !entries.length;
+      status(matches.length ? "" : entries.length ? "No saved bases match." : "No saved bases in this vault.");
     };
     body.append(filter, list);
     filter.oninput();
