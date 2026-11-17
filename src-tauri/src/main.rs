@@ -1254,15 +1254,58 @@ fn add_note_property(v: State<Vault>, name: String, key: String, value: note_vie
 
 #[cfg(windows)]
 fn add_note_property_in(root: &Path, index: &mut Index, name: &str, key: &str, value: note_views::PropertyValue) -> Result<String, String> {
-    let path = note_rel(name).ok_or("Invalid note name")?;
-    let fs = vaultfs::Vault::open(root).map_err(|error| error.to_string())?;
-    let note = fs.with_shell_path(&path, |path, is_dir| {
+    edit_note_property_in(root, index, name, |current| note_views::add_property(current, key, value))
+}
+
+#[cfg(windows)]
+fn property_revision(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(content.as_bytes()))
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn note_property_fields(v: State<Vault>, name: String) -> Result<(Vec<note_views::PropertyField>, String), String> {
+    let root = cur_vault(&v).ok_or("No vault open")?;
+    let path = note_rel(&name).ok_or("Invalid note name")?;
+    let fs = vaultfs::Vault::open(&root).map_err(|error| error.to_string())?;
+    let current = read_property_note(&fs, &path)?;
+    Ok((note_views::property_fields(&current)?, property_revision(&current)))
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn set_note_property(v: State<Vault>, name: String, key: String, value: note_views::PropertyValue, revision: String) -> Result<String, String> {
+    let root = cur_vault(&v).ok_or("No vault open")?;
+    let mut index = v.index.lock().map_err(|error| error.to_string())?;
+    edit_note_property_in(&root, &mut index, &name, |current| set_property_at_revision(current, &key, value, &revision))
+}
+
+#[cfg(windows)]
+fn set_property_at_revision(current: &str, key: &str, value: note_views::PropertyValue, revision: &str) -> Result<String, String> {
+    if property_revision(current) != revision {
+        return Err("The note changed. Reopen the property editor and try again.".into());
+    }
+    note_views::set_property(current, key, value)
+}
+
+#[cfg(windows)]
+fn read_property_note(fs: &vaultfs::Vault, path: &Path) -> Result<String, String> {
+    let note = fs.with_shell_path(path, |path, is_dir| {
         !is_dir && path.canonicalize().ok().as_deref() == Some(path)
     }).map_err(|error| error.to_string())?;
     if !note { return Err("Select a note at its current vault path".into()); }
-    let bytes = fs.p_read(&path, index::MAX_NOTE_BYTES).map_err(|error| error.to_string())?;
-    let current = String::from_utf8(bytes).map_err(|_| "The note is not valid UTF-8")?;
-    let next = note_views::add_property(&current, key, value)?;
+    let bytes = fs.p_read(path, index::MAX_NOTE_BYTES).map_err(|error| error.to_string())?;
+    String::from_utf8(bytes).map_err(|_| "The note is not valid UTF-8".into())
+}
+
+#[cfg(windows)]
+fn edit_note_property_in(root: &Path, index: &mut Index, name: &str, edit: impl FnOnce(&str) -> Result<String, String>) -> Result<String, String> {
+    let path = note_rel(name).ok_or("Invalid note name")?;
+    let fs = vaultfs::Vault::open(root).map_err(|error| error.to_string())?;
+    let current = read_property_note(&fs, &path)?;
+    let next = edit(&current)?;
+    if next == current { return Ok(next); }
     if next.len() as u64 > index::MAX_NOTE_BYTES { return Err("The note would exceed the 32 MiB limit".into()); }
     history::snapshot(&fs, &path, current.as_bytes()).map_err(|error| error.to_string())?;
     if !fs.replace_if_unchanged(&path, current.as_bytes(), next.as_bytes()).map_err(|error| error.to_string())? {
@@ -1295,6 +1338,14 @@ fn note_property_save_updates_index_and_preserves_history() {
     assert_eq!(history::read(&vault, note, &revisions[0].id).unwrap(), original.as_bytes());
     assert!(add_note_property_in(&root, &mut index, "Project", "status", note_views::PropertyValue::Checkbox(true)).is_err());
     assert_eq!(fs::read_to_string(root.join("Project.md")).unwrap(), changed);
+    let revision = property_revision(&changed);
+    let update = |current: &str| set_property_at_revision(current, "status", note_views::PropertyValue::Text("done".into()), &revision);
+    let edited = edit_note_property_in(&root, &mut index, "Project", update).unwrap();
+    assert_eq!(index.content("Project"), Some(edited.as_str()));
+    assert_eq!(fs::read_to_string(root.join("Project.md")).unwrap(), edited);
+    assert_eq!(history::read(&vault, note, &history::list(&vault, note).unwrap()[0].id).unwrap(), changed.as_bytes());
+    assert!(edit_note_property_in(&root, &mut index, "Project", update).is_err());
+    assert_eq!(fs::read_to_string(root.join("Project.md")).unwrap(), edited);
 }
 
 #[cfg(windows)]
@@ -7411,6 +7462,8 @@ fn main() {
             list_notes, list_images, canvas_io, canvas_attach, paste_image, read_note, write_note, create_note, render, render_blocks, block_lines, render_view, highlight_blocks, graph, graph_local, graph_view, vault_get, pick_vault,
             note_history, read_revision, restore_revision, vault_tasks, vault_note_rows,
             #[cfg(windows)] add_note_property,
+            #[cfg(windows)] note_property_fields,
+            #[cfg(windows)] set_note_property,
             #[cfg(windows)] vault_base_paths,
             #[cfg(windows)] trash_vault_base,
             #[cfg(windows)] create_vault_base,

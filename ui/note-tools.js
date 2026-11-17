@@ -34,6 +34,17 @@ async function toolFlush(note) {
   }
 }
 
+async function toolRefreshPropertyNote(name, content, message) {
+  try {
+    for (const group of groups()) {
+      const tab = group.tabs[group.active];
+      if (tab && !tab.kind && tab.name === name && !bufDirty(group)) await reloadInPlace(group, content);
+    }
+    await afterWrite(name);
+    say(message);
+  } catch (error) { say("Property saved. Could not refresh the workspace: " + errStr(error)); }
+}
+
 function toolAddProperty(name) {
   const { dialog, body, status } = toolDialog("Add property · " + name);
   const form = toolNode("form");
@@ -83,14 +94,117 @@ function toolAddProperty(name) {
       fields.disabled = close.disabled = false;
       return;
     }
+    await toolRefreshPropertyNote(name, content, "Property added to " + name);
+    dialog.close();
+  };
+}
+
+async function toolEditProperties(name) {
+  const { dialog, body, status } = toolDialog("Edit properties · " + name);
+  let properties, revision;
+  try {
+    await Promise.all(savesInFlight);
+    await toolFlush(name);
+    [properties, revision] = await inv("note_property_fields", { name });
+  } catch (error) { status(errStr(error)); return; }
+  if (!dialog.open) return;
+
+  const add = toolNode("button", "Add property…");
+  add.type = "button";
+  add.onclick = () => { dialog.close(); toolAddProperty(name); };
+  if (!properties.length) {
+    body.append(toolNode("p", "This note has no named properties."), add);
+    add.focus();
+    return;
+  }
+
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const select = toolSelect("Property", properties.map(({ key }) => [key, key]));
+  const editor = toolNode("div");
+  const save = toolNode("button", "Save property");
+  save.type = "submit";
+  const actions = toolNode("div");
+  actions.className = "note-tool-actions";
+  actions.append(save, add);
+  fields.append(select, editor, actions);
+  form.append(fields);
+  body.append(form);
+  const close = dialog.querySelector("header button");
+  let readValue;
+  const textField = (value, label, numeric = false) => {
+    const input = toolNode(numeric ? "input" : "textarea");
+    if (numeric) input.inputMode = "decimal";
+    else input.rows = 2;
+    input.setAttribute("aria-label", label);
+    input.value = value;
+    const initial = input.value;
+    return [input, () => input.value === initial ? value : input.value];
+  };
+  select.onchange = () => {
+    const property = properties[select.selectedIndex];
+    const value = property.value;
+    editor.replaceChildren();
+    status("");
+    save.disabled = !value;
+    if (!value) {
+      editor.append(toolNode("pre", property.display), toolNode("p", "Edit this property in Source mode."));
+    } else if (value.kind === "checkbox") {
+      const checkbox = toolNode("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = value.value;
+      const label = toolNode("label");
+      label.append(checkbox, document.createTextNode(" Checked"));
+      editor.append(label);
+      readValue = () => checkbox.checked;
+    } else if (value.kind === "list") {
+      const list = toolNode("div");
+      const readers = new Map();
+      const appendItem = text => {
+        const row = toolNode("div");
+        row.className = "note-tool-property-item";
+        const [input, read] = textField(text, "List item");
+        const remove = toolNode("button", "Remove item");
+        remove.type = "button";
+        remove.onclick = () => { readers.delete(row); row.remove(); insert.focus(); };
+        readers.set(row, read);
+        row.append(input, remove);
+        list.append(row);
+        return input;
+      };
+      const insert = toolNode("button", "Add item");
+      insert.type = "button";
+      insert.onclick = () => appendItem("").focus();
+      value.value.forEach(appendItem);
+      editor.append(list, insert);
+      readValue = () => [...readers.values()].map(read => read());
+    } else {
+      const [input, read] = textField(value.value, "Property value", value.kind === "number");
+      editor.append(input);
+      readValue = read;
+    }
+  };
+  select.onchange();
+  select.focus();
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled || save.disabled) return;
+    const { key, value } = properties[select.selectedIndex];
+    const next = { kind: value.kind, value: readValue() };
+    fields.disabled = close.disabled = true;
+    status("");
+    let content;
     try {
-      for (const group of groups()) {
-        const tab = group.tabs[group.active];
-        if (tab && !tab.kind && tab.name === name && !bufDirty(group)) await reloadInPlace(group, content);
-      }
-      await afterWrite(name);
-      say("Property added to " + name);
-    } catch (error) { say("Property saved. Could not refresh the workspace: " + errStr(error)); }
+      await Promise.all(savesInFlight);
+      await toolFlush(name);
+      content = await inv("set_note_property", { name, key, value: next, revision });
+    } catch (error) {
+      status(errStr(error));
+      fields.disabled = close.disabled = false;
+      return;
+    }
+    await toolRefreshPropertyNote(name, content, "Property saved in " + name);
     dialog.close();
   };
 }

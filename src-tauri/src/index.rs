@@ -289,7 +289,13 @@ fn frontmatter_tags(yaml: &[&str], out: &mut Vec<String>) {
         let l = yaml[i];
         i += 1;
         let Some(rest) = l.strip_prefix("tags:").or_else(|| l.strip_prefix("tag:")) else { continue };
-        let rest = rest.trim().trim_start_matches('[').trim_end_matches(']');
+        let rest = rest.trim();
+        let rest = match rest.strip_prefix('[').and_then(|value| value.rsplit_once(']')) {
+            Some((items, suffix)) if suffix.trim_start().starts_with('#') => items,
+            _ if rest.starts_with("# ") || rest.starts_with('#')
+                && yaml.get(i).is_some_and(|line| line.trim_start().starts_with("- ")) => "",
+            _ => rest.trim_start_matches('[').trim_end_matches(']'),
+        };
         if !rest.is_empty() {
             rest.split(|c: char| c == ',' || c.is_whitespace()).for_each(&mut push);
             continue;

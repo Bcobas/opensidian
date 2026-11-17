@@ -4833,6 +4833,7 @@ function tabMenu(e, g, i, hdr) {
        windowsFileActions ? null : "Available on Windows");
   item("Add file property", windowsFileActions ? () => { closeMenu(); toolAddProperty(tab.name); } : null,
        windowsFileActions ? null : "Available on Windows");
+  if (windowsFileActions) item("Edit file properties", () => { closeMenu(); void toolEditProperties(tab.name); });
   item("Export to PDF...", null, "Missing subsystem: a PDF pipeline — no renderer and no page-size/margin model; PDF export is an explicit project non-goal");
   // ---- group 5 (2 rows) ----
   sep();

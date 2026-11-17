@@ -856,6 +856,8 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
 .note-tool form label:has(input[type="checkbox"]) { margin-block: 0.35rem 0.8rem }
 .note-tool form input[hidden], .note-tool form select[hidden] { display: none }
 .note-tool section > button + button { margin-inline-start: 0.5rem }
+.note-tool-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.8rem }
+.note-tool-property-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0.5rem }
 @media (max-width: 620px) {
   .note-tool-compare { grid-template-columns: 1fr }
   .note-tool-compare textarea { min-height: 25vh }
