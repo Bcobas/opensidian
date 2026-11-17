@@ -2401,12 +2401,12 @@ function graphNodeMenu(e, hit, scope) {
    that lives in no file. This is the single seam all four creation paths share,
    so the default body is "" here and nowhere else; the rust command defaults an
    absent `content` to "" too, so neither side can re-mint a heading alone. */
-async function createNote(name, content) {
+async function createNote(name, content, onError = saveFailed) {
   const body = content != null ? content : "";
   try { await inv("create_note", { name, content: body }); }
   catch (e) {
     if (errStr(e) === "exists") return "exists";
-    saveFailed(name, e);
+    onError(name, e);
     return "err";
   }
   await afterWrite(name);

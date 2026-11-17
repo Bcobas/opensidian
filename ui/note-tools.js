@@ -652,6 +652,64 @@ function toolEditBaseView(view, write) {
   };
 }
 
+function toolCreateBaseNote(path, view, refresh, open) {
+  const { dialog, body, status } = toolDialog("New note · " + view.title);
+  const form = toolNode("form");
+  const fields = toolNode("fieldset");
+  const name = toolNode("input");
+  name.required = true;
+  const nameLabel = toolNode("label", "Note name");
+  nameLabel.append(name);
+  const folder = toolNode("input");
+  folder.value = view.new_note?.folder ?? path.slice(0, Math.max(0, path.lastIndexOf("/")));
+  const folderLabel = toolNode("label", "Folder path within the vault (optional)");
+  folderLabel.append(folder);
+  const content = toolNode("textarea");
+  content.rows = 6;
+  content.value = view.new_note?.content ?? "";
+  const contentLabel = toolNode("label", "Note content");
+  contentLabel.append(content);
+  const save = toolNode("button", "Create note");
+  save.type = "submit";
+  const close = dialog.querySelector("header button");
+  fields.append(nameLabel, folderLabel, contentLabel, save);
+  form.append(fields);
+  body.append(form);
+  name.focus();
+  dialog.addEventListener("cancel", event => { if (fields.disabled) event.preventDefault(); });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.disabled) return;
+    const stem = name.value.trim().replace(/\.md$/i, "");
+    if (!stem || /[\\/]/.test(stem)) { status("Enter a file name without a folder path."); return; }
+    const directory = folder.value.trim().replaceAll("\\", "/").replace(/\/+$/, "");
+    if (directory && directory.split("/").some(part => !part || part === "." || part === "..")) {
+      status("Enter a folder relative to the vault.");
+      return;
+    }
+    const note = directory ? directory + "/" + stem : stem;
+    fields.disabled = close.disabled = true;
+    status("");
+    try {
+      await toolFlush();
+      const result = await createNote(note, content.value, (_, error) => status(errStr(error)));
+      if (result === "exists") status("A note with this name already exists.");
+      if (result !== "ok") return;
+      form.remove();
+      const openNote = toolButton("Open note", () => { dialog.close(); open(note); });
+      body.append(openNote);
+      status("Created " + note + ".md");
+      try {
+        if (!await refresh(note)) status("Created " + note + ".md. This note is outside the current results.");
+      } catch (error) {
+        status("Created " + note + ".md. Could not refresh the table. " + errStr(error));
+      }
+      openNote.focus();
+    } catch (error) { status(errStr(error)); }
+    finally { fields.disabled = close.disabled = false; }
+  };
+}
+
 function toolEditBaseFilters(base, view, write) {
   const { dialog, body, status } = toolDialog("Edit filters · " + (view?.title ?? "All views"));
   const form = toolNode("form");
@@ -954,6 +1012,16 @@ async function toolOpenBase(path) {
     const defaultSort = view => view.sort.length ? view.sort : [{ property: view.columns[0], direction: "ASC" }];
     let sortOverride = null;
     let results = [];
+    const newNote = toolButton("New note", () => {
+      const view = activeView();
+      toolCreateBaseNote(path, view, async name => {
+        base = await inv("open_vault_base", { path });
+        refreshViewPicker(Math.max(0, base.views.findIndex(candidate => candidate.title === view.title)));
+        collapsed.clear();
+        render();
+        return results.some(row => row.name === name);
+      }, name => { dialog.close(); void openInTab(name); });
+    });
     const addView = toolButton("Add view", () => {
       toolAddBaseView(base, activeView(), async config => {
         base = await inv("add_vault_base_view", { path, revision: base.revision, config });
@@ -1120,7 +1188,7 @@ async function toolOpenBase(path) {
       render();
     };
     filter.oninput = render;
-    body.append(filter, choose, addView, editView, edit, editSort, editColumns, editFilters, editBaseFilters, exportCsv, copyTable, table);
+    body.append(filter, choose, addView, editView, edit, editSort, editColumns, editFilters, editBaseFilters, exportCsv, copyTable, newNote, table);
     render();
   } catch (error) { status(errStr(error)); }
 }

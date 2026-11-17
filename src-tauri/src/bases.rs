@@ -134,6 +134,13 @@ pub struct Table {
     group_by: Option<PropertyOrder>,
     manual_groups: bool,
     filters: ViewFilters,
+    new_note: NewNoteDefaults,
+}
+
+#[derive(Serialize)]
+struct NewNoteDefaults {
+    folder: Option<String>,
+    content: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -717,6 +724,35 @@ fn filter_editor(source: &Yaml, filter: &Filter) -> Result<ViewFilters, String> 
     Ok(ViewFilters::Yaml { yaml: yaml.strip_prefix("---\n").unwrap_or(&yaml).to_owned() })
 }
 
+fn new_note_defaults(global: &ViewFilters, view: &ViewFilters) -> NewNoteDefaults {
+    let forms: Vec<_> = [global, view].into_iter().filter_map(|filter| match filter {
+        ViewFilters::Conditions(form) => Some(form),
+        ViewFilters::Yaml { .. } => None,
+    }).collect();
+    let folders: Vec<_> = forms.iter().filter_map(|form| form.folder.as_deref()).collect();
+    let folder = folders.iter().copied().max_by_key(|folder| folder.len()).filter(|deepest| {
+        folders.iter().all(|folder| deepest == folder
+            || deepest.strip_prefix(*folder).is_some_and(|suffix| suffix.starts_with('/')))
+    }).map(str::to_owned);
+    let mut values = BTreeMap::new();
+    for condition in forms.iter().flat_map(|form| &form.conditions).filter(|condition| condition.operator == Operator::Eq) {
+        values.entry(condition.property.as_str()).and_modify(|previous| {
+            if *previous != Some(condition) { *previous = None; }
+        }).or_insert(Some(condition));
+    }
+    let mut content = String::new();
+    for (key, condition) in values.into_iter().filter_map(|(key, condition)| condition.map(|condition| (key, condition))) {
+        if key.trim() != key { continue; }
+        let value = match condition.kind {
+            ValueKind::Text => note_views::PropertyValue::Text(condition.value.clone()),
+            ValueKind::Number => note_views::PropertyValue::Number(condition.value.clone()),
+            ValueKind::Checkbox => note_views::PropertyValue::Checkbox(condition.value == "true"),
+        };
+        if let Ok(updated) = note_views::add_property(&content, key, value) { content = updated; }
+    }
+    NewNoteDefaults { folder, content }
+}
+
 fn and_filter(filters: Vec<Yaml>) -> Yaml {
     let mut all = yaml_rust2::yaml::Hash::new();
     all.insert(Yaml::String("and".into()), Yaml::Array(filters));
@@ -902,14 +938,15 @@ fn render_base(base: &Yaml, index: &Index, revision: String) -> Result<Base, Str
         }
         let sort = sorting(view)?;
         let filter = Filter::parse(&view["filters"], 0)?;
-        let filters = filter_editor(&view["filters"], &filter)?;
+        let view_filters = filter_editor(&view["filters"], &filter)?;
+        let new_note = new_note_defaults(&filters, &view_filters);
         let matching = docs.iter().filter(|(name, _, properties)| filter.matches(name, properties));
         let group_by = grouping(view)?;
         let order = &view["groupOrder"];
         let (rows, groups) = grouped_rows(group_by.as_ref(), order, matching)?;
         let manual_groups = !order.is_badvalue();
         let limit = view_limit(view).and_then(|limit| usize::try_from(limit).ok());
-        Ok(Table { id, title: view_title(view).to_owned(), columns, sort, limit, labels, rows, groups, group_by, manual_groups, filters })
+        Ok(Table { id, title: view_title(view).to_owned(), columns, sort, limit, labels, rows, groups, group_by, manual_groups, filters: view_filters, new_note })
     }).collect::<Result<Vec<_>, String>>()?;
     if views.is_empty() { return Err("This base has no supported table view".into()); }
     Ok(Base { revision, properties, can_add_view, filters, views })
@@ -1164,6 +1201,41 @@ views:
             "Nota\tDetalle\r\nCafé, té\t\"Dijo \"\"hola\"\"\nAdiós\"\r\n-3.5\t\"Uno\tDos\"\r\n\t'  =1+1\r\nAquí\u{fffd}sigue\t\r\n");
         assert_eq!(clipboard_table(headers.clone(), vec![]).unwrap(), "Nota\tDetalle\r\n");
         assert!(clipboard_table(headers, vec![vec!["Short".into()]]).is_err());
+    }
+
+    #[test]
+    fn presets_the_deepest_compatible_folder_and_typed_equalities() {
+        let render = |source: &str| {
+            let yaml = parse(source.as_bytes()).unwrap();
+            filter_editor(&yaml, &Filter::parse(&yaml, 0).unwrap()).unwrap()
+        };
+        let global = render(r#"and:
+  - 'file.inFolder("Work")'
+  - 'status == "pending"'
+  - 'done == false'
+  - 'priority > 2'
+"#);
+        let table = render(r#"and:
+  - 'file.inFolder("Work/Projects")'
+  - 'priority == 5'
+"#);
+        let defaults = new_note_defaults(&global, &table);
+        assert_eq!(defaults.folder.as_deref(), Some("Work/Projects"));
+        let fields = note_views::properties(&defaults.content);
+        assert_eq!(fields[&Yaml::String("status".into())], Yaml::String("pending".into()));
+        assert_eq!(fields[&Yaml::String("done".into())], Yaml::Boolean(false));
+        assert_eq!(fields[&Yaml::String("priority".into())], Yaml::Integer(5));
+        let incompatible = render(r#"and:
+  - 'file.inFolder("Archive")'
+  - 'status == "closed"'
+"#);
+        let defaults = new_note_defaults(&global, &incompatible);
+        assert!(defaults.folder.is_none());
+        assert_eq!(note_views::properties(&defaults.content).len(), 1);
+        let advanced = render(r#"or: ['priority == 5', 'priority == 6']"#);
+        let defaults = new_note_defaults(&global, &advanced);
+        assert_eq!(defaults.folder.as_deref(), Some("Work"));
+        assert!(!note_views::properties(&defaults.content).contains_key(&Yaml::String("priority".into())));
     }
 
     #[test]
