@@ -98,7 +98,10 @@
     </div>
     <div id="p-sub" hidden>
       <input id="p-name" placeholder="Vault name" hidden>
-      <input id="p-path" spellcheck="false" title="location">
+      <div id="p-path-row">
+        <input id="p-path" spellcheck="false" title="location">
+        <button type="button" id="p-browse" aria-haspopup="dialog" hidden>Browse...</button>
+      </div>
       <ul id="p-dirs"></ul>
       <div id="p-err"></div>
       <div id="p-btns">

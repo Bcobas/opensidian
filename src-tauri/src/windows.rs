@@ -190,14 +190,15 @@ mod tests {
     }
 }
 
-pub enum PackagePicker {
+pub enum PathPicker {
     Archive,
     VaultParent,
     ZipParent,
+    VaultFolder,
 }
 
 /// Show a modal picker on the window's UI thread.
-pub fn pick_package_path(owner: HWND, picker: PackagePicker) -> ::windows::core::Result<Option<PathBuf>> {
+pub fn pick_path(owner: HWND, picker: PathPicker) -> ::windows::core::Result<Option<PathBuf>> {
     // The caller runs this on the window thread. Shell objects and their path
     // buffers are used and released in this apartment before returning.
     let _apartment = Apartment::enter()?;
@@ -205,7 +206,7 @@ pub fn pick_package_path(owner: HWND, picker: PackagePicker) -> ::windows::core:
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
         let mut options = dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_PATHMUSTEXIST;
         match picker {
-            PackagePicker::Archive => {
+            PathPicker::Archive => {
                 dialog.SetTitle(w!("Open portable package"))?;
                 dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
                     pszName: w!("Opensidian packages (*.opensidian.zip)"),
@@ -213,13 +214,14 @@ pub fn pick_package_path(owner: HWND, picker: PackagePicker) -> ::windows::core:
                 }])?;
                 options |= FOS_FILEMUSTEXIST;
             }
-            PackagePicker::VaultParent | PackagePicker::ZipParent => {
-                let title = match picker {
-                    PackagePicker::VaultParent => w!("Choose where to save the vault"),
-                    _ => w!("Choose where to save the ZIP copy"),
+            PathPicker::VaultParent | PathPicker::ZipParent | PathPicker::VaultFolder => {
+                let (title, label) = match picker {
+                    PathPicker::VaultParent => (w!("Choose where to save the vault"), w!("Save here")),
+                    PathPicker::ZipParent => (w!("Choose where to save the ZIP copy"), w!("Save here")),
+                    _ => (w!("Choose a vault folder"), w!("Select folder")),
                 };
                 dialog.SetTitle(title)?;
-                dialog.SetOkButtonLabel(w!("Save here"))?;
+                dialog.SetOkButtonLabel(label)?;
                 options = (options & !FOS_FILEMUSTEXIST) | FOS_PICKFOLDERS;
             }
         }

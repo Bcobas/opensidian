@@ -12167,6 +12167,7 @@ async function enterMode(m) {
   $("p-actions").style.display = "none";
   $("p-sub").hidden = false;
   $("p-name").hidden = m !== "create";
+  $("p-browse").hidden = !windowsFileActions;
   $("p-go").textContent = m === "create" ? "Create vault" : "Open this folder";
   $("p-gonew").hidden = !vaultPath;          // vaultbleed: open/create in a NEW window, keep this one
   $("p-gonew").textContent = m === "create" ? "Create in new window" : "Open in new window";
@@ -12175,8 +12176,28 @@ async function enterMode(m) {
   (m === "create" ? $("p-name") : $("p-path")).focus();
   if (vaultPath) { try { updateTitle(); } catch (_) {} }   // item 14: publish [pbtn:] for the sub-mode buttons (never at the boot picker)
 }
+async function browseNativeVaultFolder() {
+  const browse = $("p-browse");
+  const mode = pmode;
+  if (!windowsFileActions || browse.disabled || !mode || $("picker").hidden) return;
+  browse.disabled = true;
+  $("p-err").textContent = "";
+  try {
+    const folder = await inv("pick_vault_folder");
+    if (folder && pmode === mode && !$("picker").hidden) {
+      await browseTo(folder);
+      (mode === "create" ? $("p-name") : $("p-go")).focus();
+    }
+  } catch (error) {
+    if (pmode === mode && !$("picker").hidden) $("p-err").textContent = errStr(error);
+  } finally { browse.disabled = false; }
+}
 $("p-create").onclick = () => enterMode("create");
-$("p-open").onclick = () => enterMode("open");
+$("p-open").onclick = async () => {
+  await enterMode("open");
+  if (pmode === "open") await browseNativeVaultFolder();
+};
+$("p-browse").onclick = browseNativeVaultFolder;
 $("p-back").onclick = showPicker;
 $("p-recent").addEventListener("scroll", () => { if (vaultPath) { try { updateTitle(); } catch (_) {} } }, { passive: true });   // item 14: [prow:] follows the list scroll
 $("p-close").onclick = () => { $("picker").hidden = true; try { updateTitle(); } catch (_) {} };   // bug-ui #14: the census (window title) drops [precent:] with the picker, as the Esc path does

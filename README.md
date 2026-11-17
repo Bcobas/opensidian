@@ -31,6 +31,8 @@ To open a standalone `.md`, `.markdown`, `.txt`, or `.pdf` file, right-click it 
 
 Open the command palette with **Ctrl+P** to use the vault tools.
 
+On Windows, **Open** in the vault picker opens the system folder dialog. Use **Browse...** to choose a different folder or select where to create a vault.
+
 - **Open version history** compares saved revisions with the current note. Restoring a revision keeps the replaced text in history. Up to 30 revisions and 64 MiB are kept per vault note.
 - **Export note with its files** previews a portable ZIP containing the current note, its local attachments, and the linked notes you select. The ZIP contains Markdown with relative links. **Open portable package** lets you choose an `.opensidian.zip` file from the vault picker, command palette, or standalone reader on Windows. You can also drop a single package onto the vault window or pass its path to `opensidian.exe`. Opensidian opens the main note in a temporary vault and rebuilds its search and backlinks. To keep your edits, use **Save package as vault** from the command palette and choose a location for a new folder. The saved vault keeps the current notes and attachments with their relative paths.
 - **Open today's note** opens or creates `Daily/YYYY-MM-DD.md`. **Open vault tasks** lists Markdown tasks with status and text filters and links to their source lines.

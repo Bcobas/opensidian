@@ -1491,7 +1491,7 @@ fn open_package(path: String) -> Result<(), String> {
 async fn pick_package(window: tauri::Window) -> Result<bool, String> {
     #[cfg(windows)]
     {
-        if let Some(path) = choose_package_path(window, windows::PackagePicker::Archive).await? {
+        if let Some(path) = choose_native_path(window, windows::PathPicker::Archive).await? {
             portable::launch(&path)?;
         }
         Ok(true)
@@ -1504,16 +1504,24 @@ async fn pick_package(window: tauri::Window) -> Result<bool, String> {
 }
 
 #[cfg(windows)]
-async fn choose_package_path(window: tauri::Window, picker: windows::PackagePicker) -> Result<Option<PathBuf>, String> {
+async fn choose_native_path(window: tauri::Window, picker: windows::PathPicker) -> Result<Option<PathBuf>, String> {
     let (send, mut receive) = tauri::async_runtime::channel(1);
     let owner = window.clone();
     window.run_on_main_thread(move || {
         let result = owner.hwnd().map_err(|error| error.to_string()).and_then(|hwnd| {
-            windows::pick_package_path(hwnd, picker).map_err(|error| error.to_string())
+            windows::pick_path(hwnd, picker).map_err(|error| error.to_string())
         });
         let _ = send.try_send(result);
     }).map_err(|error| error.to_string())?;
-    receive.recv().await.ok_or("The package picker closed unexpectedly".to_owned())?
+    receive.recv().await.ok_or("The Windows picker closed unexpectedly".to_owned())?
+}
+
+#[cfg(windows)]
+#[tauri::command]
+async fn pick_vault_folder(window: tauri::Window) -> Result<Option<String>, String> {
+    choose_native_path(window, windows::PathPicker::VaultFolder).await?
+        .map(|path| path.into_os_string().into_string().map_err(|_| "The folder path is not valid Unicode".to_owned()))
+        .transpose()
 }
 
 #[cfg(windows)]
@@ -1554,7 +1562,7 @@ async fn save_package_as_vault(app: tauri::AppHandle, window: tauri::Window, nam
         use tauri::Manager;
         if app.state::<PackageState>().0.is_none() { return Err("Open a portable package first".to_owned()); }
         let name = name.trim().to_owned();
-        let Some(parent) = choose_package_path(window, windows::PackagePicker::VaultParent).await? else { return Ok(None) };
+        let Some(parent) = choose_native_path(window, windows::PathPicker::VaultParent).await? else { return Ok(None) };
         if !picker_allows(&parent.join(&name)) { return Err("Choose a valid vault location and name".to_owned()); }
         tauri::async_runtime::spawn_blocking(move || {
             let package = app.state::<PackageState>();
@@ -1593,7 +1601,7 @@ async fn save_updated_package(
     if !safe_rel(&name).is_some_and(|path| path.file_name() == Some(std::ffi::OsStr::new(&name)) && portable::is_package(&path)) {
         return Err("Enter a valid .opensidian.zip filename".to_owned());
     }
-    let Some(parent) = choose_package_path(window, windows::PackagePicker::ZipParent).await? else { return Ok(None) };
+    let Some(parent) = choose_native_path(window, windows::PathPicker::ZipParent).await? else { return Ok(None) };
     tauri::async_runtime::spawn_blocking(move || {
         let package = app.state::<PackageState>();
         let session = package.0.as_ref().ok_or("Open a portable package first")?;
@@ -7412,6 +7420,7 @@ fn main() {
             #[cfg(windows)] restore_canvas_revision,
             #[cfg(windows)] merge_vault_notes,
             preview_package, export_package, package_session, open_package, pick_package, save_package_as_vault, open_package_pdf,
+            #[cfg(windows)] pick_vault_folder,
             #[cfg(windows)] preview_updated_package,
             #[cfg(windows)] save_updated_package,
             #[cfg(windows)] vault_file_action,
