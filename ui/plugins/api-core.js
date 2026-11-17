@@ -671,6 +671,7 @@
     async function enable(id) {
       if (registry.has(id)) return { ok: true, id };
       if (!K.st.trusted) return host.fail(id, new Error("restricted mode is on"));
+      if (be.windows && !K.st.pageEval) return { ok: true, id };
       const manifest = K.st.manifests[id];
       if (!manifest) return host.fail(id, new Error("not installed (no manifest.json)"));
       installDom();
@@ -720,6 +721,7 @@
     async function refresh() {
       const s = await be.state();
       K.st.trusted = !!s.trusted;
+      K.st.pageEval = !!s.pageEval;
       K.st.enabledIds = (s.enabled || []).slice();
       K.st.manifests = {};
       for (const p of s.installed || []) if (p && p.id && p.manifest) K.st.manifests[p.id] = p.manifest;
@@ -745,9 +747,14 @@
     }
     async function setRestricted(restricted) {
       await be.set({ trusted: !restricted });
+      await syncEnabled();
+    }
+    async function syncEnabled() {
       await refresh();
-      if (restricted) for (const id of [...registry.keys()]) disable(id);
-      else for (const id of K.st.enabledIds) await enable(id);
+      for (const id of [...registry.keys()]) {
+        if (!K.st.trusted || !K.st.enabledIds.includes(id)) disable(id);
+      }
+      if (K.st.trusted) for (const id of K.st.enabledIds) await enable(id);
       touch();
     }
     /* boot: called by main.js once the vault is entered. Restricted mode (the
@@ -757,6 +764,14 @@
       try {
         K.st.vaultName = String(vaultPathArg || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
         app.appId = String(vaultPathArg || "").split("").reduce((h, c) => (Math.imul(h, 31) + c.charCodeAt(0)) | 0, 7).toString(16);
+        if (be.windows && be.listen) {
+          let sync = Promise.resolve();
+          await be.listen("vault-plugins-changed", event => {
+            if (event.payload !== be.label) {
+              sync = sync.then(syncEnabled).catch(error => console.error("[plugins] sync:", error));
+            }
+          });
+        }
         await refresh();
         K.st.layoutReady = true; workspace.layoutReady = true;
         if (K.st.trusted) for (const id of K.st.enabledIds) await enable(id);

@@ -87,7 +87,7 @@ pub fn plugin_dir_in(root: &Path, id: &str) -> Option<PathBuf> {
 /// rule 5: a file inside a confined plugin dir. Ok(None) = absent, Err = refuse
 pub fn plugin_file_in(root: &Path, id: &str, file: &str, cap: u64) -> Result<Option<PathBuf>, &'static str> {
     let dir = plugin_dir_in(root, id).ok_or("plugin dir not confined")?;
-    if file.is_empty() || file.contains('/') || file.starts_with('.') {
+    if file.is_empty() || file.contains(['/', '\\', ':']) || file.starts_with('.') {
         return Err("bad file name");
     }
     let p = dir.join(file);
@@ -149,7 +149,7 @@ pub fn is_trusted(cfg: &serde_json::Value, root: &Path) -> bool {
 /// BB1 (PR #42 round 11): the trust check for a key computed earlier (trust_key canonicalizes the
 /// vault root: a path lookup, done before the lifecycle lock by desk_shell)
 pub fn is_trusted_key(cfg: &serde_json::Value, key: &str) -> bool {
-    cfg!(target_os = "linux") && cfg["plugins_trusted"][key].as_bool() == Some(true)
+    cfg!(any(target_os = "linux", windows)) && cfg["plugins_trusted"][key].as_bool() == Some(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +277,7 @@ pub fn read_styles(root: &Path, id: &str) -> Result<Option<String>, String> {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests {
     use super::*;
 

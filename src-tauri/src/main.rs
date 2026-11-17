@@ -84,6 +84,8 @@ mod folder_actions;
 mod note_merge;
 #[cfg(windows)]
 mod note_windows;
+#[cfg(windows)]
+mod windows_plugins;
 
 #[cfg(windows)]
 mod sandbox {
@@ -4270,7 +4272,10 @@ fn csp_by_trust(header: &str, trusted: bool) -> String {
     let (mut worker, mut media) = (false, false);
     for d in header.split(';').map(str::trim).filter(|d| !d.is_empty()) {
         match d.split_whitespace().next().unwrap_or("") {
-            "script-src" => out.push(format!("{d} 'unsafe-eval' blob:")),
+            "script-src" => {
+                let plugin_origin = if cfg!(windows) { " http://opensidian-plugin.localhost" } else { "" };
+                out.push(format!("{d} 'unsafe-eval' blob:{plugin_origin}"));
+            }
             "worker-src" => {
                 worker = true;
                 out.push(format!("{d} blob:"));
@@ -4298,7 +4303,7 @@ fn csp_by_trust(header: &str, trusted: bool) -> String {
 
 /// the response hook of the page window: an HTML page (the only responses
 /// Tauri gives a CSP header) gets the header of the vault's trust state
-fn page_csp(h: &tauri::AppHandle, res: &mut tauri::http::Response<std::borrow::Cow<'static, [u8]>>) {
+fn page_csp(h: &tauri::AppHandle, _label: &str, res: &mut tauri::http::Response<std::borrow::Cow<'static, [u8]>>) {
     use tauri::Manager;
     let Some(base) = res.headers().get("Content-Security-Policy").and_then(|v| v.to_str().ok()).map(str::to_owned) else {
         return;
@@ -4313,6 +4318,9 @@ fn page_csp(h: &tauri::AppHandle, res: &mut tauri::http::Response<std::borrow::C
         // keep Tauri's (restricted) header: never widen on a failure
         Err(_) => PAGE_EVAL.store(false, std::sync::atomic::Ordering::SeqCst),
     }
+    #[cfg(windows)]
+    h.state::<windows_plugins::WindowsPlugins>().set_page(_label, trusted
+        && res.headers()["Content-Security-Policy"].to_str().is_ok_and(|header| header == csp));
     eprintln!("[csp] page trusted={trusted} Content-Security-Policy: {}", res.headers()["Content-Security-Policy"].to_str().unwrap_or("?"));
 }
 
@@ -4374,6 +4382,7 @@ fn vfs_sync(h: &tauri::AppHandle, req: &tauri::http::Request<Vec<u8>>) -> PageRe
 /// the app window, from the config entry, with page_csp on its responses
 fn page_window(app: &tauri::AppHandle, wc: &tauri::utils::config::WindowConfig) -> tauri::Result<()> {
     let h = app.clone();
+    let label = wc.label.clone();
     let b = tauri::WebviewWindowBuilder::from_config(app, wc)?;
     // census-gate: the title census exists only when opted in (census.rs); off = no script, no flag
     let b = if census::on() { b.initialization_script(census::INIT_JS) } else { b };
@@ -4385,7 +4394,7 @@ fn page_window(app: &tauri::AppHandle, wc: &tauri::utils::config::WindowConfig) 
         } else {
             #[cfg(feature = "devui")]
             devui::serve(req.uri().path(), res);
-            page_csp(&h, res)
+            page_csp(&h, &label, res)
         }
     })
     .build()?;
@@ -4404,8 +4413,14 @@ fn plugins_state_of(root: &Path) -> serde_json::Value {
 
 /// {trusted, enabled:[id], installed:[{id, manifest, hasMain, hasStyles}]}
 #[tauri::command]
-fn plugins_state(v: State<Vault>, otel: Option<perf::Ctx>) -> Result<serde_json::Value, String> {
+fn plugins_state(v: State<Vault>, _win: tauri::Window, otel: Option<perf::Ctx>) -> Result<serde_json::Value, String> {
     let root = cur_vault(&v).ok_or("no vault open")?;
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        return Ok(span_timed!(otel => "plugins_state", _win.state::<windows_plugins::WindowsPlugins>().page_state(_win.label(), &root)));
+    }
+    #[cfg(not(windows))]
     Ok(span_timed!(otel => "plugins_state", plugins_state_of(&root)))
 }
 
@@ -4485,6 +4500,10 @@ fn plugin_io(
     otel: Option<perf::Ctx>,
 ) -> Result<serde_json::Value, String> {
     let root = cur_vault(&v).ok_or("no vault open")?;
+    #[cfg(windows)]
+    if !plugins::is_trusted(&cfg_value(), &root) {
+        return Err("EPERM: restricted mode, plugin data access is off".into());
+    }
     span_timed!(otel => "plugin_io", match op.as_str() {
         "load" => plugins::read_data(&root, &id),
         "save" => plugins::write_data(&root, &id, data.as_ref().unwrap_or(&serde_json::Value::Null))
@@ -7329,7 +7348,8 @@ fn main() {
     });
     let builder = tauri::Builder::default();
     #[cfg(windows)]
-    let builder = builder.manage(note_windows::NoteWindows::default());
+    let builder = builder.manage(note_windows::NoteWindows::default())
+        .manage(windows_plugins::WindowsPlugins::default());
     builder
         .plugin(appid::plugin())
         .manage(vault)
@@ -7415,7 +7435,13 @@ fn main() {
             #[cfg(not(windows))]
             quit_event(w, e); // tab-dataloss: a close waits (bounded) for the UI flush
             #[cfg(windows)]
-            note_windows::on_event(w, e);
+            {
+                use tauri::Manager;
+                note_windows::on_event(w, e);
+                if matches!(e, tauri::WindowEvent::Destroyed) {
+                    w.state::<windows_plugins::WindowsPlugins>().remove_page(w.label());
+                }
+            }
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position }) = e {
                 use tauri::Emitter;
                 #[cfg(windows)]
@@ -7550,6 +7576,7 @@ fn main() {
             snippets_scan, snippets_enabled, snippet_css, set_snippet_enabled,
             plugins_state, plugin_io, plugin_vfs,
             #[cfg(target_os = "linux")] plugins_set,
+            #[cfg(windows)] windows_plugins::plugins_set,
             #[cfg(target_os = "linux")] desk_proc_spawn,
             #[cfg(target_os = "linux")] desk_proc_read,
             #[cfg(target_os = "linux")] desk_proc_write,

@@ -205,7 +205,82 @@ pub fn http_get(logical: &str, cap: u64, what: &str) -> Result<Vec<u8>, String> 
     Err(format!("{what}: more than {MAX_REDIRECTS} redirects"))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+pub fn http_get(logical: &str, cap: u64, what: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let base = mirror_base();
+    let mut cur = check_url(logical)?;
+    let curl = Path::new(&std::env::var_os("SystemRoot").ok_or("Windows system folder unavailable")?)
+        .join("System32").join("curl.exe");
+    let deadline = Instant::now() + DEADLINE;
+    for _ in 0..=MAX_REDIRECTS {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
+        if remaining == 0 { return Err(format!("{what}: timed out")); }
+        let wire = wire_url(&cur, base.as_ref());
+        let mut command = Command::new(&curl);
+        command.args(["--disable", "--noproxy", "*", "--silent", "--globoff", "--proto", "=http,https",
+            "--max-time", &remaining.min(u64::from(IO_TIMEOUT_S)).to_string(),
+            "--max-filesize", &cap.to_string(), "--write-out", "\\n%{http_code}\\n%{redirect_url}\\n",
+            "--user-agent", concat!("opensidian/", env!("CARGO_PKG_VERSION"), " plugin-browser")]);
+        if cur.host_str() == Some("api.github.com") {
+            command.args(["--header", "Accept: application/vnd.github+json"]);
+        }
+        let mut child = command.args(["--", wire.as_str()])
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .creation_flags(0x0800_0000).spawn().map_err(|error| format!("{what}: could not start system curl: {error}"))?;
+        let mut bytes = Vec::new();
+        let limit = cap + 16 * 1024;
+        let read = child.stdout.take().expect("piped plugin download").take(limit + 1).read_to_end(&mut bytes);
+        let too_large = bytes.len() as u64 > limit;
+        if read.is_err() || too_large { let _ = child.kill(); }
+        let status = child.wait().map_err(|error| format!("{what}: {error}"))?;
+        read.map_err(|error| format!("{what}: {error}"))?;
+        if too_large || status.code() == Some(63) { return Err(format!("refused: {what} is larger than the {cap}-byte cap")); }
+        if !status.success() { return Err(format!("{what}: network request failed ({status})")); }
+        let (code, redirect, body_len) = curl_response(&bytes).ok_or_else(|| format!("{what}: invalid HTTP response"))?;
+        if matches!(code, 301 | 302 | 303 | 307 | 308) {
+            if redirect.is_empty() { return Err(format!("{what}: HTTP {code} without a Location")); }
+            cur = next_hop(&cur, redirect, base.as_ref())?;
+            continue;
+        }
+        if code != 200 {
+            let hint = if matches!(code, 403 | 429) && cur.host_str() == Some("api.github.com") {
+                " (GitHub's anonymous API rate limit; try again later)"
+            } else { "" };
+            return Err(format!("{what}: HTTP {code} from {}{hint}", cur.host_str().unwrap_or("?")));
+        }
+        if body_len as u64 > cap { return Err(format!("refused: {what} is larger than the {cap}-byte cap")); }
+        bytes.truncate(body_len);
+        return Ok(bytes);
+    }
+    Err(format!("{what}: more than {MAX_REDIRECTS} redirects"))
+}
+
+#[cfg(windows)]
+fn curl_response(bytes: &[u8]) -> Option<(u16, &str, usize)> {
+    let mut fields = bytes.strip_suffix(b"\n")?.rsplitn(3, |byte| *byte == b'\n');
+    let redirect = std::str::from_utf8(fields.next()?).ok()?;
+    let code = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+    Some((code, redirect, fields.next()?.len()))
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_store_preserves_binary_bodies_and_rechecks_redirects() {
+    let response = b"body\xFF\r\n200\n\n200\n\n";
+    assert_eq!(curl_response(response), Some((200, "", 11)));
+    assert_eq!(curl_response(b"malformed"), None);
+    let response = b"\n302\nhttps://example.org/plugin.js\n";
+    let (code, redirect, len) = curl_response(response).unwrap();
+    assert_eq!((code, len), (302, 0));
+    let origin = check_url(LIST_URL).unwrap();
+    assert!(next_hop(&origin, redirect, None).is_err());
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn http_get(logical: &str, _cap: u64, what: &str) -> Result<Vec<u8>, String> {
     check_url(logical)?;
     Err(format!("{what}: the plugin browser has no network client on this platform"))

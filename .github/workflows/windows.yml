@@ -88,6 +88,15 @@ jobs:
       - name: Test concurrent note window saves
         working-directory: src-tauri
         run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_windows::tests
+      - name: Test community plugins on Windows
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian 'plugins::tests'
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian windows_plugin
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian windows_store
       - name: Test OCR on a scanned PDF
         working-directory: src-tauri
         shell: pwsh

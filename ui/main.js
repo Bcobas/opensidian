@@ -2248,6 +2248,23 @@ $("bmebox").addEventListener("mousedown", e => { if (e.target === $("bmebox")) e
 const windowsFileActions = /Windows/.test(navigator.userAgent);
 const appWindow = TAURI.window.getCurrentWindow();
 const secondaryVaultWindow = appWindow.label.startsWith("vault-note-");
+const PLUGIN_WORKSPACE_KEY = "opensidian-plugin-reload-workspace";
+
+async function reloadForPluginPolicy(beforeReload) {
+  if (!state || document.body.inert) return false;
+  document.body.inert = true;
+  try {
+    await Promise.all(savesInFlight);
+    if ((await leaveVault()).length) {
+      say("Resolve the unsaved note changes to finish applying the plugin setting.");
+      return false;
+    }
+    if (secondaryVaultWindow) sessionStorage.setItem(PLUGIN_WORKSPACE_KEY, JSON.stringify(wsDoc()));
+    beforeReload();
+    location.reload();
+    return true;
+  } finally { document.body.inert = false; }
+}
 
 function fileActionItem(item, label, path, action, note) {
   if (!windowsFileActions) {
@@ -12353,7 +12370,13 @@ async function enterVault(noteSeed = null) {
   // R28.7: read the layout BEFORE the first render. renderLayout -> updateTitle
   // -> wsTouch arms a 400ms write, so reading later would race a write of the
   // empty boot layout over the file we came here to restore.
-  const wdoc = secondaryVaultWindow ? null : await wsRead();
+  let wdoc = secondaryVaultWindow ? null : await wsRead();
+  if (secondaryVaultWindow) {
+    try {
+      wdoc = JSON.parse(sessionStorage.getItem(PLUGIN_WORKSPACE_KEY));
+      sessionStorage.removeItem(PLUGIN_WORKSPACE_KEY);
+    } catch (_) { /* the seed is the fallback */ }
+  }
   const g = mkGroup();               // M6: one group, wrapped in a one-leaf split tree
   state = { root: { dir: "row", children: [g], fractions: [1] }, focused: null };
   renderLayout();
@@ -12368,7 +12391,7 @@ async function enterVault(noteSeed = null) {
   // R28.7 / R28.13: the restore, or — if there is no file, it is corrupt, or
   // nothing in it survived the degrade rule — the ordinary first-launch path.
   // Both land on a usable window; that is the whole point of R28.13.
-  if (noteSeed) {
+  if (noteSeed && !await wsApply(wdoc, names)) {
     if (!names.includes(noteSeed.name)) throw new Error("The note is no longer in the vault.");
     const tab = mkTab(noteSeed.name);
     tab.mode = noteSeed.mode;
@@ -12376,7 +12399,7 @@ async function enterVault(noteSeed = null) {
     g.tabs.push(tab);
     g.active = 0;
     await loadActive(g);
-  } else if (!await wsApply(wdoc, names)) {
+  } else if (!noteSeed && !await wsApply(wdoc, names)) {
     if (names.length) await openInTab(packageInfo && names.includes(packageInfo[0]) ? packageInfo[0] : names[0], "boot");
     else renderTabs(g);
   }

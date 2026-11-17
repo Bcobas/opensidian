@@ -20,7 +20,7 @@ Download one from the [v0.9.2 release](https://github.com/jpzk/opensidian/releas
 
 ### Windows x64
 
-Download the unsigned NSIS installer from a successful run of the [Windows build workflow](https://github.com/Bcobas/opensidian/actions/workflows/windows.yml). The installer uses Microsoft Edge WebView2. Community plugins and Landlock are unavailable on Windows.
+Download the unsigned NSIS installer from a successful run of the [Windows build workflow](https://github.com/Bcobas/opensidian/actions/workflows/windows.yml). The installer uses Microsoft Edge WebView2.
 
 To open a standalone `.md`, `.markdown`, `.txt`, or `.pdf` file, use **Open file** in the vault picker or **Open document** in the command palette or reader toolbar. You can also use **Open with → Opensidian** in Explorer or pass a quoted file path to `opensidian.exe`. The document opens in its own window without creating a vault.
 
@@ -41,6 +41,7 @@ On Windows, **Open** in the vault picker opens the system folder dialog. Use **B
 - On Windows, use **Edit file properties** in a note tab’s menu to update text, numbers, checkboxes or text lists. Use **Add property** in that dialog to add a field. Changes are saved to the note’s YAML and are available to note tables and Bases.
 - On Windows, right-click a Markdown tab and choose **Open in new window** to keep the original tab, or **Move to new window** to close it once the new window opens. The windows share the same vault and can be closed independently. Only the main window's layout is restored on the next launch.
 - On Windows, **Bases** in the left ribbon lists the vault’s saved `.base` files and offers **Create a base**. You can also run **Open Bases** from the command palette.
+- On Windows, **Settings → Community plugins** lets you browse, install and enable plugins. Restricted mode is on by default. Windows asks for confirmation before trusting a vault. Compatibility depends on the plugin's APIs. Native Node process and server networking APIs and Landlock are unavailable on Windows.
 - **Capture web content** saves a public page URL or a pasted selection into `Web captures/`, with an option to download supported images into the vault. Page capture uses the HTML sent by the site and the system `curl` command.
 
 To build locally, install the MSVC C++ build tools, WebView2, Rust 1.98.0, and Tauri CLI 2.11.4. From the repository root, run:

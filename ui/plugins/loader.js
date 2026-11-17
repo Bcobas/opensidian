@@ -42,7 +42,8 @@
   const T = window.__TAURI__;
   const invoke = T && T.core && T.core.invoke ? T.core.invoke.bind(T.core) : null;
   const listen = T && T.event && T.event.listen ? T.event.listen.bind(T.event) : null;   // item 5: vault-changed for the plugin vault model
-  const SCHEME = "opensidian-plugin://localhost/";
+  const isWindows = location.hostname === "tauri.localhost" && /Windows/.test(navigator.userAgent);
+  const SCHEME = isWindows ? "http://opensidian-plugin.localhost/" : "opensidian-plugin://localhost/";
   const NODE = window.__osNodeModules;   // captured at boot (index.html loads node-leaves.js first)
 
   const status = new Map();   // id -> {state: "loading"|"loaded"|"failed"|"unloaded", error?}
@@ -289,6 +290,15 @@
     if (cspReload) return;
     if (n >= 2) { console.warn("[plugins] page CSP still disagrees with the vault trust flag after 2 reloads"); return; }
     cspReload = true;
+    if (isWindows) {
+      Promise.resolve().then(() => reloadForPluginPolicy(() => {
+        try { sessionStorage.setItem(KEY, String(n + 1)); } catch (_) {}
+      })).then(reloading => { if (!reloading) cspReload = false; }, error => {
+        cspReload = false;
+        console.error("[plugins] could not reload:", error);
+      });
+      return;
+    }
     try { sessionStorage.setItem(KEY, String(n + 1)); } catch (_) {}
     console.warn("[plugins] reloading the page into the CSP of the vault's trust state");
     Promise.resolve(invoke ? invoke("save_debounce_ms") : 0).catch(() => 0)
@@ -308,7 +318,7 @@
     const trusted = !!s.trusted;
     evalWanted = trusted && !s.pageEval;
     if (trusted === s.pageEval) { try { sessionStorage.removeItem("osCspReload"); } catch (_) {} return s; }
-    if (!trusted) cspReloadNow();
+    if (!trusted || isWindows) cspReloadNow();
     return s;
   }
 
@@ -328,6 +338,8 @@
       fn({
         state: () => invoke("plugins_state").then(cspCheck),
         set: a => invoke("plugins_set", a).then(cspCheck),
+        windows: isWindows,
+        label: T?.window?.getCurrentWindow?.()?.label,
         io: (id, op, data) => invoke("plugin_io", data === undefined ? { id, op } : { id, op, data }),
         invoke,   // api.js's own vault calls (read/modify/...) — never handed to a plugin
         listen,   // api.js subscribes to vault-changed (Vault create/modify/delete/rename events)

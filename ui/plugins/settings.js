@@ -194,10 +194,7 @@
   }
   function buildCommunity(pg) {
     const s = host.state();
-    if (location.hostname === "tauri.localhost") {
-      const card = el("div", "scard"); pg.appendChild(card);
-      row(card, "Community plugins", "Community plugins are unavailable in this Windows build.", [], true);
-    } else {
+    {
       const restricted = !s.trusted;
       const c1 = el("div", "scard"); pg.appendChild(c1);
       const rt = toggle(restricted, () => act(() => host.setRestricted(!restricted)));
