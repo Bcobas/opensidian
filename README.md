@@ -22,7 +22,7 @@ Download one from the [v0.9.2 release](https://github.com/jpzk/opensidian/releas
 
 Download the unsigned NSIS installer from a successful run of the [Windows build workflow](https://github.com/Bcobas/opensidian/actions/workflows/windows.yml). The installer uses Microsoft Edge WebView2. Community plugins and Landlock are unavailable on Windows.
 
-To open a standalone `.md`, `.markdown`, `.txt`, or `.pdf` file, right-click it in Explorer and choose **Open with → Opensidian**. You can also pass a quoted file path to `opensidian.exe`. The document opens in its own window without creating a vault.
+To open a standalone `.md`, `.markdown`, `.txt`, or `.pdf` file, use **Open file** in the vault picker or **Open document** in the command palette or reader toolbar. You can also use **Open with → Opensidian** in Explorer or pass a quoted file path to `opensidian.exe`. The document opens in its own window without creating a vault.
 
 - **Markdown:** use **Edit** and **Preview** to switch views. **Save** (Ctrl+S) updates the original file. If the file changed on disk, save your draft as a copy or reload the original. Relative images and links to Markdown or text files resolve within the document folder. **Export note with its files** packages the current Markdown, including unsaved edits, and the local attachments and linked notes you review. The ZIP is written next to the original, and you can open it immediately as a temporary vault.
 - **Text:** use **Convert to Markdown** to edit or preview the draft, then **Save as Markdown**. The app creates a new UTF-8 Markdown file next to the original and picks an available name if one already exists. The source can be UTF-8 or UTF-16 with a byte-order mark.

@@ -1526,6 +1526,15 @@ async fn pick_vault_folder(window: tauri::Window) -> Result<Option<String>, Stri
 
 #[cfg(windows)]
 #[tauri::command]
+async fn pick_document(window: tauri::Window) -> Result<(), String> {
+    if let Some(path) = choose_native_path(window, windows::PathPicker::Document).await? {
+        reader::launch_document(&path)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tauri::command]
 async fn vault_file_action(window: tauri::Window, v: State<'_, Vault>, path: String, action: file_actions::Action) -> Result<(), String> {
     let root = cur_vault(&v).ok_or("No vault open")?;
     let (send, mut receive) = tauri::async_runtime::channel(1);
@@ -7421,6 +7430,7 @@ fn main() {
             #[cfg(windows)] merge_vault_notes,
             preview_package, export_package, package_session, open_package, pick_package, save_package_as_vault, open_package_pdf,
             #[cfg(windows)] pick_vault_folder,
+            #[cfg(windows)] pick_document,
             #[cfg(windows)] preview_updated_package,
             #[cfg(windows)] save_updated_package,
             #[cfg(windows)] vault_file_action,

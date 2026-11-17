@@ -385,6 +385,13 @@ fn open_reader_link(url: String) -> Result<(), String> {
 #[tauri::command]
 fn open_reader_document(reader: State<'_, Reader>, target: String) -> Result<(), String> {
     let path = reader.with_file(|doc| doc.linked_document(&target).ok_or("Linked document was not found".to_owned()))?;
+    launch_document(&path)
+}
+
+pub fn launch_document(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() || kind(path).is_none() || !path.is_file() {
+        return Err("Choose an existing Markdown, text or PDF file".into());
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     std::process::Command::new(exe).arg(path).env_remove("VAULT_DIR").spawn()
         .map(drop).map_err(|e| e.to_string())
@@ -453,7 +460,7 @@ pub fn run(path: &Path, mut context: tauri::Context<Wry>, initial_page: usize) {
         })
         .invoke_handler(tauri::generate_handler![
             standalone_document, convert_reader_pdf, preview_reader_markdown, save_reader_markdown, export_reader_markdown,
-            preview_reader_package, export_reader_package, open_reader_package, crate::pick_package,
+            preview_reader_package, export_reader_package, open_reader_package, crate::pick_package, crate::pick_document,
             reload_reader_document, open_reader_link, open_reader_document, close_reader
         ])
         .run(context)
@@ -480,6 +487,18 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_paths_before_launching_a_reader() {
+        let root = Fixture::new();
+        let unrelated = root.0.join("Other.zip");
+        let directory = root.0.join("Folder.pdf");
+        fs::write(&unrelated, "").unwrap();
+        fs::create_dir(&directory).unwrap();
+        for path in [unrelated, directory, root.0.join("Missing.MD"), PathBuf::from("Relative.txt")] {
+            assert_eq!(launch_document(&path).unwrap_err(), "Choose an existing Markdown, text or PDF file");
         }
     }
 

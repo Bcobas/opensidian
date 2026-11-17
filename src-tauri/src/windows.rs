@@ -192,6 +192,7 @@ mod tests {
 
 pub enum PathPicker {
     Archive,
+    Document,
     VaultParent,
     ZipParent,
     VaultFolder,
@@ -211,6 +212,14 @@ pub fn pick_path(owner: HWND, picker: PathPicker) -> ::windows::core::Result<Opt
                 dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
                     pszName: w!("Opensidian packages (*.opensidian.zip)"),
                     pszSpec: w!("*.opensidian.zip"),
+                }])?;
+                options |= FOS_FILEMUSTEXIST;
+            }
+            PathPicker::Document => {
+                dialog.SetTitle(w!("Open document"))?;
+                dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+                    pszName: w!("Markdown, text and PDF documents"),
+                    pszSpec: w!("*.md;*.markdown;*.txt;*.pdf"),
                 }])?;
                 options |= FOS_FILEMUSTEXIST;
             }

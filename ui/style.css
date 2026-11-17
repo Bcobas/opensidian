@@ -927,6 +927,7 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
 #p-actions { margin: 0 -10px; padding: 0 10px }
 .prow { display: flex; align-items: center; gap: 12px; padding: 14px 0;
         border-top: 1px solid var(--bg-surface) }
+.prow[hidden] { display: none }
 .ptext { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere }   /* long text wraps, never squeezes the button */
 .ptext span { color: var(--text-chrome-muted); font-size: 12px }
 .prow button, #p-go, #p-gonew { background: var(--bg-button-primary); color: var(--text-on-accent); border: 0;
@@ -947,7 +948,7 @@ body { display: flex; font: 14px/1.5 var(--font-interface);
           border: 1px solid var(--bg-surface); border-radius: 5px; margin: 6px 0 }
 #p-dirs li { padding: 4px 10px; cursor: pointer; font-size: 13px }
 #p-dirs li:hover { background: var(--bg-surface) }
-#p-err { color: var(--accent-red); font-size: 12px; min-height: 18px }
+#p-err, #p-document-error { color: var(--accent-red); font-size: 12px; min-height: 18px }
 /* R1.6 recent-vault rows: empty list collapses to just the top border */
 /* startscr: the list box reaches 10px into the card padding so its rows' TEXT sits on the .prow text column */
 #p-recent { list-style: none; margin: 0 -10px; padding: 5px 0 4px;

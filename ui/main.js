@@ -10015,6 +10015,7 @@ const CMDS = [
   ["opensidian:new-base", "Create a base", [], () => toolCreateBase(""), () => !!vaultPath && windowsFileActions],
   ["opensidian:package-export", "Export note with its files", [], () => toolPortableExport(toolActiveNote()), () => !!toolActiveNote()],
   ["opensidian:package-open", "Open portable package", [], toolOpenPackage],
+  ["opensidian:document-open", "Open document", [], toolOpenDocument, () => windowsFileActions],
   ["opensidian:package-save-vault", "Save package as vault", [], toolSavePackageAsVault, () => !!packageInfo?.[2]],
   ["opensidian:package-save-zip", "Save updated package", [], toolSaveUpdatedPackage, () => !!packageInfo?.[2]],
   ["opensidian:web-capture", "Capture web content", [], toolWebCapture, () => !!vaultPath],
@@ -12102,6 +12103,7 @@ function showPicker() {
   $("p-actions").style.display = "";
   $("p-sub").hidden = true;
   $("p-err").textContent = "";
+  $("p-document-error").hidden = true;
   $("p-close").hidden = !vaultPath;
   loadRecent();
 }
@@ -12192,6 +12194,24 @@ async function browseNativeVaultFolder() {
     if (pmode === mode && !$("picker").hidden) $("p-err").textContent = errStr(error);
   } finally { browse.disabled = false; }
 }
+async function toolOpenDocument() {
+  const trigger = $("p-open-document");
+  const message = $("p-document-error");
+  if (!windowsFileActions || trigger.disabled) return;
+  trigger.disabled = true;
+  message.hidden = true;
+  try { await inv("pick_document"); }
+  catch (error) {
+    if ($("picker").hidden) say(errStr(error));
+    else if (pmode) $("p-err").textContent = errStr(error);
+    else {
+      message.textContent = errStr(error);
+      message.hidden = false;
+    }
+  } finally { trigger.disabled = false; }
+}
+$("p-document-row").hidden = !windowsFileActions;
+$("p-open-document").onclick = toolOpenDocument;
 $("p-create").onclick = () => enterMode("create");
 $("p-open").onclick = async () => {
   await enterMode("open");
