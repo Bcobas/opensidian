@@ -6,11 +6,13 @@ on:
     paths:
       - 'src-tauri/**'
       - 'ui/**'
+      - '.gitattributes'
       - '.github/workflows/windows.yml'
   pull_request:
     paths:
       - 'src-tauri/**'
       - 'ui/**'
+      - '.gitattributes'
       - '.github/workflows/windows.yml'
   workflow_dispatch:
 
@@ -39,64 +41,9 @@ jobs:
           $cli = Get-ChildItem $directory -Recurse -Filter cargo-tauri.exe | Select-Object -First 1
           if (!$cli) { throw 'Tauri CLI executable missing from archive' }
           $cli.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-      - name: Test the vault backend
+      - name: Test the Windows app and vault backend
         working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --lib
-      - name: Test standalone editing and document conversion
-        working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian reader::tests
-      - name: Test local history and note views
-        working-directory: src-tauri
-        shell: pwsh
-        run: |
-          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian history::tests
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_views::tests
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_property_save_updates_index_and_preserves_history
-      - name: Test portable packages and web capture
-        working-directory: src-tauri
-        shell: pwsh
-        run: |
-          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian portable::tests
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian web_clip::tests
-      - name: Test Windows file actions
-        working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian file_actions::tests
-      - name: Test graph clipboard bitmap
-        working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian windows::tests
-      - name: Test Windows folder actions
-        working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian folder_actions::tests
-      - name: Test Windows note merge
-        working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_merge::tests
-      - name: Test folder and canvas bookmarks
-        working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian bookmark_folder_canvas_keep_paths_and_metadata
-      - name: Test Windows canvas history
-        working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian canvas_history::tests
-      - name: Test folder-scoped search
-        working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian search_folder_scope_applies_before_the_result_limit
-      - name: Test saved base tables
-        working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian bases::tests
-      - name: Test concurrent note window saves
-        working-directory: src-tauri
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian note_windows::tests
-      - name: Test community plugins on Windows
-        working-directory: src-tauri
-        shell: pwsh
-        run: |
-          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian 'plugins::tests'
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian windows_plugin
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo test --release --locked --target x86_64-pc-windows-msvc --bin opensidian windows_store
+        run: cargo test --release --locked --target x86_64-pc-windows-msvc --lib --bin opensidian
       - name: Test OCR on a scanned PDF
         working-directory: src-tauri
         shell: pwsh

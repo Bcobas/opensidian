@@ -396,7 +396,10 @@ mod tests {
         for op in [Op::Load, Op::Ids, Op::Set("k", "v"), Op::Delete("k")] {
             let e = run(Some(&addr), "/v", op).unwrap_err();
             assert!(e.starts_with("unsupported: secret storage needs a Secret Service"), "{e}");
+            #[cfg(target_os = "linux")]
             assert!(e.contains("cannot connect"), "{e}");
+            #[cfg(not(target_os = "linux"))]
+            assert!(e.contains("this platform has no freedesktop Secret Service"), "{e}");
         }
         assert!(!dir.exists());
     }

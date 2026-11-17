@@ -38,6 +38,7 @@
 
    Key: FNV-1a-64 of the canonical path bytes, hex, plus the canonical path
    written into the file for humans (`cat` tells you which vault it is). */
+#[cfg(target_os = "linux")]
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -102,6 +103,7 @@ pub fn ready_in(dir: &Path, canon: &Path, token: &str) -> bool {
 }
 
 /// directory the lock files live in (pure: the caller reads the environment)
+#[cfg(target_os = "linux")]
 pub fn lock_dir(flatpak_id: Option<OsString>, xdg_runtime: Option<OsString>, home: &Path) -> PathBuf {
     let rt = xdg_runtime.map(PathBuf::from).filter(|p| p.is_absolute());
     match (flatpak_id.filter(|s| !s.is_empty()), rt) {
@@ -230,10 +232,13 @@ pub(crate) mod tests {
         fs::create_dir_all(&b).unwrap();
         let _lb = acquire_in(&locks, &b.canonicalize().unwrap()).expect("other vault is free");
         drop(first);
-        let _again = acquire_eventually(&locks, &canon).expect("free again after the holder dropped");
+        let again = acquire_eventually(&locks, &canon).expect("free again after the holder dropped");
+        // Windows locks the byte range for reads through other handles as well.
+        drop(again);
         assert_eq!(fs::read_to_string(lock_file(&locks, &canon)).unwrap().trim_end(), canon.to_str().unwrap());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn vaultlock_contention_across_processes() {
         // a real second PROCESS holds the lock: flock(1) from util-linux on the
@@ -265,6 +270,50 @@ pub(crate) mod tests {
         acquire_eventually(&locks, &canon).expect("free once that process is gone");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn vaultlock_contention_across_processes() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const CHILD_DIR: &str = "OPENSIDIAN_TEST_VAULTLOCK_CHILD";
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            let dir = PathBuf::from(dir);
+            let canon = dir.join("A").canonicalize().unwrap();
+            let _held = acquire_in(&dir.join("locks"), &canon).expect("child takes the lock");
+            fs::write(dir.join("ready"), b"").unwrap();
+            std::thread::sleep(Duration::from_secs(20));
+            return;
+        }
+
+        let dir = tmp("proc");
+        let vault = dir.join("A");
+        fs::create_dir(&vault).unwrap();
+        let canon = vault.canonicalize().unwrap();
+        let locks = dir.join("locks");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "vaultlock::tests::vaultlock_contention_across_processes"])
+            .env(CHILD_DIR, &dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .expect("start the second Windows process");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let ready = dir.join("ready");
+        while !ready.is_file() && Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let attempted = ready.is_file().then(|| acquire_in(&locks, &canon));
+        let _ = child.kill();
+        child.wait().expect("reap the child process");
+        assert!(matches!(attempted, Some(Err(LockErr::Busy(ref path))) if path == &canon),
+            "the child process must hold this vault's lock, got {attempted:?}");
+        acquire_eventually(&locks, &canon).expect("free once that process is gone");
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn vaultlock_dir_flatpak_uses_the_shared_per_app_runtime_dir() {
         let home = Path::new("/home/u");
